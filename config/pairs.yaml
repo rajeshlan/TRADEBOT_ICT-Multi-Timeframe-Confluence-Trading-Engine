@@ -1,0 +1,27 @@
+pairs:
+  - symbol: BTCUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d, 1M]
+
+  - symbol: ETHUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d, 1M]
+
+  - symbol: SOLUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d, 1M]
+
+  - symbol: AAVEUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d, 1M]
+
+  - symbol: TAOUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d, 1M]
+
+  - symbol: ASTRUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d, 1M]
+
+  - symbol: ONDOUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d, 1M]
+
+  - symbol: LTCUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d, 1M]
+
+  - symbol: FETUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d, 1M]
