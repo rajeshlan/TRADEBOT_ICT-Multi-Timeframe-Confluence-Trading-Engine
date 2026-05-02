@@ -13,9 +13,8 @@ class SignalManager:
 
     def process(self, symbol, results_by_tf):
         """
-        🚀 PHASE 6.2 — DISCIPLINE ENGINE (Patch 1: LTF FVG Engine)
-        Filters signals by HTF/LTF alignment, mandatory liquidity, and cooldowns.
-        LTF now accepts FVG + Liquidity as a valid entry trigger without needing an OB.
+        🚀 PHASE 6.3 — DISCIPLINE ENGINE (Risk Filter Edition)
+        Filters signals by HTF/LTF alignment, mandatory liquidity, and risk distance.
         """
         now = time.time()
 
@@ -86,7 +85,7 @@ class SignalManager:
 
             # --- ⚙️ STEP 5 — LIQUIDITY SCORING ---
             if has_liq:
-                score += 5  # Base liquidity presence
+                score += 5  # Base liquidity
                 
                 if liq.get("swept"):
                     score += 10  # 🔥 BIG BOOST for sweep
@@ -99,34 +98,30 @@ class SignalManager:
                     score += 10 if correct_dir else 3
 
         # ⚙️ STEP 7 — DEBUG
-        print(f"[INFO] {symbol} Score={score} TFs={valid_timeframes} HTF={htf_present} LTF={ltf_present}")
+        print(f"[INFO] {symbol} RawScore={score} TFs={valid_timeframes} HTF={htf_present} LTF={ltf_present}")
 
         # 4️⃣ STEP 4 — STRICT FILTERS
-        # ❌ Rule 1: Multi-TF Confluence
         if len(valid_timeframes) < 2:
             print(f"[REJECTED] {symbol} Not enough TF confluence")
             return None
 
-        # ❌ Rule 2: HTF Narrative + LTF Entry alignment
         if not (htf_present and ltf_present):
             print(f"[REJECTED] {symbol} Missing HTF/LTF alignment")
             return None
 
-        # ❌ Rule 3: No Liquidity = No Trade
         if not any(results_by_tf[tf].get("liquidity", {}).get("has_liquidity") for tf in tfs_involved):
             print(f"[REJECTED] {symbol} No liquidity confluence")
             return None
 
-        if score < 40: return None
+        if score < 40: 
+            return None
 
         # --- Same-Bias Cooldown Check ---
         key = f"{symbol}_{bias}"
         if key in self.last_signals and (now - self.last_signals[key] < self.cooldown):
             return None
 
-        # --- Level Extraction (Safeguard added for FVG entries) ---
-        # Since an LTF might only have FVG+Liq now, we must find the highest-weighted TF 
-        # that actually contains an OB to pull safe Entry/SL parameters.
+        # --- Level Extraction ---
         best_tf = None
         best_ob = None
         
@@ -147,12 +142,23 @@ class SignalManager:
         entry, sl = best_ob.get("entry"), best_ob.get("sl")
 
         if entry and sl:
+            # 🔴 FIX 1 — ENTRY DISTANCE FILTER (CRITICAL)
+            risk_pct = abs(entry - sl) / entry * 100
+
+            if risk_pct > 3:
+                print(f"[REJECTED] {symbol} Risk too wide: {risk_pct:.2f}%")
+                return None
+
             # 6️⃣ STEP 6 — SAVE SIGNAL TIME (Final hurdle passed)
             self.last_signals[key] = now
             self.last_signal_time[symbol] = now
 
-            risk = abs(entry - sl)
-            tp = entry - (risk * 2) if bias == "BEARISH" else entry + (risk * 2)
+            risk_amount = abs(entry - sl)
+            tp = entry - (risk_amount * 2) if bias == "BEARISH" else entry + (risk_amount * 2)
+
+            # 🧠 5. FIX SCORE EXPLOSION
+            # Normalize score to a 100 max cap before returning
+            score = min(score, 100)
 
             return {
                 "symbol": symbol,
@@ -163,6 +169,7 @@ class SignalManager:
                 "sl": round(sl, 4),
                 "tp": round(tp, 4),
                 "rr": "1:2",
+                "risk_pct_distance": round(risk_pct, 2),
                 "details": f"Refined ICT Discipline Engine ({best_tf} Source)"
             }
 

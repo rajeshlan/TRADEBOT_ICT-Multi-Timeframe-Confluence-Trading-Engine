@@ -1,57 +1,66 @@
-from storage.trade_logger import load_trades
+from storage.trade_logger import load_closed_trades
 
-def get_stats():
+def get_stats(closed=None):
     """
-    🚀 PERFORMANCE ENGINE (v2.0)
-    Calculates win rates, equity growth, and tracks the account curve
-    based on dynamic risk parameters.
+    🚀 PERFORMANCE ENGINE (v3.1) - Dynamic Context Edition
+    Calculates metrics using actual Dollar PnL data.
+    Now accepts an optional list of trades for flexible data analysis.
     """
-    trades = load_trades()
-    
-    # Filter only for trades that have reached a final resolution
-    closed = [t for t in trades if t["status"] == "CLOSED"]
-
-    if not closed:
-        print("[INFO] No closed trades found for analytics.")
+    try:
+        # ✅ FIX: Use provided list or fallback to loading from disk
+        if closed is None:
+            closed = load_closed_trades()
+    except Exception:
+        # Silently fail to allow the Dashboard's retry mechanism to trigger
         return None
 
-    # 📈 Core Metrics
-    wins = sum(1 for t in closed if t["result"] == "WIN")
-    losses = sum(1 for t in closed if t["result"] == "LOSS")
+    # Handle cases where no trades have been resolved yet
+    if not closed:
+        return {
+            "total": 0,
+            "wins": 0,
+            "losses": 0,
+            "winrate": 0,
+            "rr": 2,
+            "final_balance": 100.0,
+            "total_return_pct": 0.0,
+            "equity_curve": [100.0]
+        }
+
+    # 📈 1. CORE PERFORMANCE METRICS
+    wins = sum(1 for t in closed if t.get("result") == "WIN")
+    losses = sum(1 for t in closed if t.get("result") == "LOSS")
     total = len(closed)
     
-    # Mathematical stats
-    winrate = wins / total if total else 0
-    rr = 2  # Fixed Risk:Reward target used by the ICT Engine
+    winrate = (wins / total) * 100 if total > 0 else 0
+    rr_target = 2  # Standard ICT Strategy Risk:Reward
 
-    # 💰 Equity Simulation
-    pnl = 0
-    equity_curve = []
-    equity = 100  # Theoretical starting capital for percentage tracking
+    # 💰 2. REAL CAPITAL TRACKING (PHASE 9.2)
+    # Starting balance initialized at 100 for clear growth visualization
+    initial_balance = 100.0
+    balance = initial_balance
+    equity_curve = [initial_balance]
 
     for t in closed:
-        # Pull the actual risk used at the time of signal generation
-        # Falls back to 2% if missing
-        risk_pct = t.get("risk", 2) / 100 
+        # ✅ PnL RESOLUTION:
+        # Extract the absolute dollar PnL provided by the trade_resolver
+        pnl_value = t.get("pnl", 0.0)
 
-        if t["result"] == "WIN":
-            # Gain = Equity * Risk % * RR
-            gain = equity * risk_pct * rr
-            equity += gain
-        elif t["result"] == "LOSS":
-            # Loss = Equity * Risk %
-            loss = equity * risk_pct
-            equity -= loss
+        # Apply Linear Growth:
+        # New Balance = Current Balance + Dollar PnL
+        balance += pnl_value
 
-        equity_curve.append(round(equity, 2))
+        # Log for Line Charting
+        equity_curve.append(round(balance, 2))
 
+    # 📊 3. OUTPUT CONSOLIDATION
     return {
         "total": total,
         "wins": wins,
         "losses": losses,
-        "winrate": round(winrate * 100, 2),
-        "rr": rr,
-        "final_equity": round(equity, 2),
-        "total_return_pct": round(equity - 100, 2),
+        "winrate": round(winrate, 2),
+        "rr": rr_target,
+        "final_balance": round(balance, 2),
+        "total_return_pct": round(((balance - initial_balance) / initial_balance) * 100, 2),
         "equity_curve": equity_curve
     }

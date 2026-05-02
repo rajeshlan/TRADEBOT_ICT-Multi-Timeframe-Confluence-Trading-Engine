@@ -1,0 +1,6 @@
+data==0.4
+pandas==3.0.2
+PyYAML==6.0.3
+Requests==2.33.1
+streamlit==1.57.0
+streamlit_autorefresh==1.0.1

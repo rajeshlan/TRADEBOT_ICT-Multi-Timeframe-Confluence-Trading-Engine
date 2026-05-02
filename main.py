@@ -1,7 +1,9 @@
 import yaml
 import time
+import datetime
 
-from data.candles import get_candles, get_current_price
+# ✅ DATA SOURCE: Using full OHLC candle data for precision
+from data.candles import get_candles, get_current_candle 
 from engine.evaluator import Evaluator
 from engine.signal_manager import SignalManager
 from engine.trade_resolver import resolve_trades
@@ -9,13 +11,18 @@ from core.setup_memory import SetupMemory
 from alerts.telegram import TelegramAlerter
 from alerts.formatter import format_signal
 from storage.trade_logger import log_trade
-from analytics.performance import get_stats     # ✅ Added Import
-from risk.kelly import kelly_fraction           # ✅ Added Import
+from analytics.performance import get_stats
+from risk.kelly import kelly_fraction
+
+# 🔧 STEP 2A — IMPORT STATE
+from core.trade_state import TradeStateManager
 
 # 🔐 SECURE CREDENTIALS
 BOT_TOKEN = "8638812072:AAGygbCOKHkRH3UYbHpQ38bkuBXL1HxXOKs"
 CHAT_ID = "1041385548"
 
+# --- INITIALIZATION ---
+state = TradeStateManager()  # 🔧 Initialize State Manager
 alerter = TelegramAlerter(BOT_TOKEN, CHAT_ID)
 evaluator = Evaluator()
 manager = SignalManager()
@@ -27,74 +34,98 @@ with open("config/pairs.yaml") as f:
 
 pairs = config["pairs"]
 
-print("🚀 TRADEBOT_ICT is running... Monitoring markets.")
-
-while True:
-    # ⏱ Watchdog: Terminal indicator for the start of a fresh market scan
+def run_cycle():
+    """
+    Encapsulates a single scanning and resolution pass.
+    """
     print(f"\n⏱ New cycle starting at {time.strftime('%H:%M:%S')}...")
 
     for pair in pairs:
         symbol = pair["symbol"]
         timeframes = pair["timeframes"]
-
         results = {}
 
         for tf in timeframes:
-            # ✅ Protected Candle Fetch
-            try:
-                candles = get_candles(symbol, tf)
-            except Exception as e:
-                print(f"[MAIN ERROR] {symbol}-{tf}: {e}")
-                continue
+            # ✅ DATA GUARD: Fetch data for analysis
+            candles = get_candles(symbol, tf)
             
             if not candles:
+                print(f"[SKIP] {symbol}-{tf} returned no data.")
                 continue
             
-            # Run ICT Analysis
+            # Run ICT Analysis (MSS, FVG, Liquidity)
             result = evaluator.run(symbol, tf, candles)
             results[tf] = result
 
-            # 🔥 MICRO-THROTTLE
+            # MICRO-THROTTLE to respect Binance IP limits
             time.sleep(0.3)
 
-        # 🧠 Confluence Engine
+        # 🧠 Confluence Engine: Process multi-timeframe results
         decision = manager.process(symbol, results)
 
         if decision:
-            # 🚫 DUPLICATION FILTER
+            # 🚫 DUPLICATION FILTER (Cool-down based)
             if setup_memory.is_duplicate(decision):
-                print(f"[SKIP] Duplicate setup: {decision['symbol']}")
+                print(f"[SKIP] Duplicate setup detected: {decision['symbol']}")
                 continue
 
-            # 📊 DYNAMIC RISK CALCULATION (Kelly Criterion)
-            # Fetch bot performance stats from storage
+            # 📊 PERFORMANCE-BASED RISK CALCULATION
             stats = get_stats()
-
+            
+            # 1. Kelly Criterion sizing based on historical winrate/RR
             if stats and stats.get("winrate") and stats.get("rr"):
-                # Calculate optimal fraction based on historical edge
                 kelly = kelly_fraction(stats["winrate"], stats["rr"])
             else:
-                # Default to a safe 2% risk if stats aren't mature enough
-                kelly = 0.02 
+                kelly = 0.02 # Conservative 2% fallback
 
-            # Inject calculated risk into the decision dictionary
-            decision["risk"] = round(kelly * 100, 2)
+            # 🔧 STEP 4 — FIX RISK (HARD CAP)
+            kelly_pct = kelly * 100
+            
+            # 🔒 HARD CAP (CRITICAL)
+            MAX_RISK = 2.0
+            risk = min(kelly_pct, MAX_RISK)
+            
+            decision["risk"] = round(risk, 2)
 
-            # 📡 Formatting and Transmission
+            # 📡 TRANSMISSION
             msg = format_signal(decision)
+
+            # 🔧 STEP 2B — BLOCK DUPLICATE TRADES
+            # 🚫 BLOCK duplicate trades per symbol if already active in state
+            if state.is_symbol_active(symbol):
+                print(f"[BLOCKED] {symbol} already active")
+                continue
+
             print(f"🔥 SIGNAL DETECTED: \n{msg}")
             
             print("📡 Sending alert to Telegram...") 
             alerter.send(msg)
 
-            # 📊 LOG TRADE
-            log_trade(decision)
-            print(f"✅ Trade logged to storage (Risk: {decision['risk']}%).")
+            # 📊 LOG TRADE (With Dynamic Balance Snapshot)
+            current_balance = stats["final_balance"] if stats else 100.0
+            
+            log_trade(decision, current_balance)
+            
+            # 🔧 STEP 2C — LOCK TRADE AFTER LOG
+            state.open_trade(symbol) 
+            
+            print(f"✅ Trade logged to storage (Risk: {decision['risk']}% | Base: ${current_balance}).")
 
-    # ⚖️ TRADE RESOLVER: Check active trades against current prices
+    # ⚖️ TRADE RESOLVER: Sync active/closed trades using Wick-Precision
     print("⚖️ Running Trade Resolver...")
-    resolve_trades(get_current_price)
+    resolve_trades(get_current_candle)
 
-    # 💤 LOOP PROTECTION
     print(f"💤 Scan complete. Resting for 25 seconds...")
     time.sleep(25)
+
+# --- 🔥 GLOBAL WATCHDOG LOOP ---
+print("🚀 TRADEBOT_ICT is running... Monitoring markets.")
+
+while True:
+    try:
+        run_cycle()
+    except Exception as e:
+        # 🛡️ ANTI-CRASH PROTECTION
+        print(f"\n🛑 [CRASH] System Error encountered: {e}")
+        print("🛠️ Restarting engine in 10 seconds...")
+        time.sleep(10)
