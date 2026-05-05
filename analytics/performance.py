@@ -2,65 +2,67 @@ from storage.trade_logger import load_closed_trades
 
 def get_stats(closed=None):
     """
-    🚀 PERFORMANCE ENGINE (v3.1) - Dynamic Context Edition
+    🚀 PERFORMANCE ENGINE (v3.2)
     Calculates metrics using actual Dollar PnL data.
-    Now accepts an optional list of trades for flexible data analysis.
+    Ensures the dashboard reflects real capital growth rather than just trade counts.
     """
     try:
-        # ✅ FIX: Use provided list or fallback to loading from disk
+        # ✅ DATA FALLBACK: Use provided list (from Dashboard memory) or load from disk
         if closed is None:
             closed = load_closed_trades()
-    except Exception:
-        # Silently fail to allow the Dashboard's retry mechanism to trigger
+    except Exception as e:
+        # Silently fail to let the Dashboard's refresh cycle try again
+        print(f"⚠️ [ANALYTICS] Error loading trades: {e}")
         return None
 
-    # Handle cases where no trades have been resolved yet
+    # --- 1. HANDLE EMPTY STATE ---
+    # Prevents division by zero or errors on a fresh account
     if not closed:
         return {
             "total": 0,
             "wins": 0,
             "losses": 0,
             "winrate": 0,
-            "rr": 2,
+            "rr": 2.0,
             "final_balance": 100.0,
             "total_return_pct": 0.0,
             "equity_curve": [100.0]
         }
 
-    # 📈 1. CORE PERFORMANCE METRICS
+    # --- 2. CORE PERFORMANCE METRICS ---
+    # Count occurrences of results for winrate calculation
     wins = sum(1 for t in closed if t.get("result") == "WIN")
     losses = sum(1 for t in closed if t.get("result") == "LOSS")
     total = len(closed)
     
     winrate = (wins / total) * 100 if total > 0 else 0
-    rr_target = 2  # Standard ICT Strategy Risk:Reward
+    rr_target = 2.0  # Default ICT Risk:Reward target
 
-    # 💰 2. REAL CAPITAL TRACKING (PHASE 9.2)
-    # Starting balance initialized at 100 for clear growth visualization
+    # --- 3. REAL CAPITAL TRACKING (STEP 9 FIX) ---
+    # Starting balance is initialized at $100.00
     initial_balance = 100.0
-    balance = initial_balance
+    current_balance = initial_balance
     equity_curve = [initial_balance]
 
-    for t in closed:
-        # ✅ PnL RESOLUTION:
-        # Extract the absolute dollar PnL provided by the trade_resolver
-        pnl_value = t.get("pnl", 0.0)
+    for trade in closed:
+        # ✅ CRITICAL FIX: Extract actual dollar PnL
+        # This ensures that even if a "WIN" is small, the balance reflects the truth.
+        pnl_value = trade.get("pnl", 0.0)
 
-        # Apply Linear Growth:
-        # New Balance = Current Balance + Dollar PnL
-        balance += pnl_value
+        # Update the running account balance
+        current_balance += pnl_value
 
-        # Log for Line Charting
-        equity_curve.append(round(balance, 2))
+        # Append to the curve list for Streamlit's line_chart
+        equity_curve.append(round(current_balance, 2))
 
-    # 📊 3. OUTPUT CONSOLIDATION
+    # --- 4. OUTPUT CONSOLIDATION ---
     return {
         "total": total,
         "wins": wins,
         "losses": losses,
         "winrate": round(winrate, 2),
         "rr": rr_target,
-        "final_balance": round(balance, 2),
-        "total_return_pct": round(((balance - initial_balance) / initial_balance) * 100, 2),
+        "final_balance": round(current_balance, 2),
+        "total_return_pct": round(((current_balance - initial_balance) / initial_balance) * 100, 2),
         "equity_curve": equity_curve
     }

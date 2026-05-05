@@ -1,86 +1,92 @@
-import requests
 import time
+from pybit.unified_trading import HTTP
 
-BASE_URL = "https://api.binance.com/api/v3/klines"
+# ✅ Bybit session
+session = HTTP(testnet=False)
 
-# 🔥 GLOBAL SESSION: Reuses TCP connections to avoid handshake overhead
-# This is critical for high-frequency scanning across multiple pairs.
-session = requests.Session()
+# Optional: Add a strict request timeout to the session to prevent indefinite hangs
+session._request_timeout = 10 
 
-def get_candles(symbol, interval, limit=100):
+def get_candles(symbol, timeframe, limit=200):
     """
-    Fetches candlestick data using a persistent session. 
-    Implements a 3-attempt retry logic (Phase 8.3) to handle transient network errors.
+    Fetches historical OHLCV candle data from Bybit.
+    Includes a 3-attempt retry mechanism to handle network timeouts and freezes.
     """
-    params = {
-        "symbol": symbol,
-        "interval": interval,
-        "limit": limit
+    tf_map = {
+        "1m": "1",
+        "3m": "3",
+        "5m": "5",
+        "15m": "15",
+        "30m": "30",
+        "1h": "60",
+        "2h": "120",
+        "4h": "240",
+        "1d": "D",
+        "1w": "W"
     }
 
-    # ✅ RETRY LOOP: Resilience against network blips
-    for attempt in range(3):
+    interval = tf_map.get(timeframe)
+    if not interval:
+        print(f"❌ [TF_ERROR] Unsupported timeframe: {timeframe}")
+        return None
+
+    response = None
+    
+    # 🔥 HARDENING: 3-Attempt Retry Mechanism
+    for i in range(3):
         try:
-            # 5s timeout prevents a single slow pair from hanging the entire bot
-            response = session.get(BASE_URL, params=params, timeout=5)
+            response = session.get_kline(
+                category="linear",
+                symbol=symbol,
+                interval=interval,
+                limit=limit
+            )
+            # If successful, break out of the retry loop immediately
+            break 
+            
+        except Exception as e:
+            print(f"⚠️ [TIMEOUT] {symbol} fetch failed (Attempt {i+1}/3): {e}")
+            time.sleep(0.5) # Wait half a second before trying again
 
-            # Handle Rate Limiting (HTTP 429) immediately to avoid IP ban
-            if response.status_code == 429:
-                print(f"⚠️ [RATELIMIT] {symbol} cooling down... (Attempt {attempt+1}/3)")
-                time.sleep(2)
-                continue
+    # If response is still None after all 3 retries, exit safely
+    if not response:
+        print(f"❌ [CANDLE_ERROR] {symbol} completely failed after 3 attempts.")
+        return None
 
-            if response.status_code != 200:
-                print(f"[ERROR] API Status {response.status_code} for {symbol}")
-                continue
+    try:
+        # Check Bybit's internal return code for API-level errors
+        if response.get("retCode") != 0:
+            print(f"❌ [BYBIT_ERROR] {response.get('retMsg')}")
+            return None
 
-            data = response.json()
+        raw = response.get("result", {}).get("list", [])
+        if not raw:
+            return None
 
-            # 🛠️ DATA VALIDATION FIX
-            # If API returns empty list or null data, fail fast
-            if not data or len(data) == 0:
-                return None
+        candles = []
+        # Bybit returns newest to oldest. We reverse it for standard chronological order.
+        for c in reversed(raw):
+            candles.append({
+                "timestamp": int(c[0]),
+                "open": float(c[1]),
+                "high": float(c[2]),
+                "low": float(c[3]),
+                "close": float(c[4]),
+                "volume": float(c[5]),
+            })
 
-            # Parse data into standard ICT Engine format
-            candles = []
-            for k in data:
-                # Ensure we have a full candle entry (standard kline is 12 elements)
-                if len(k) < 5:
-                    continue
+        return candles
 
-                candles.append({
-                    "open": float(k[1]),
-                    "high": float(k[2]),
-                    "low": float(k[3]),
-                    "close": float(k[4])
-                })
-
-            # Double-check result list isn't empty after parsing
-            if not candles:
-                return None
-
-            return candles
-
-        except (requests.exceptions.RequestException, ValueError) as e:
-            # ⚡ FAIL FAST & RETRY: Brief pause before trying again
-            print(f"[RETRY] Candle fetch failed ({symbol} {interval}) {attempt+1}/3: {e}")
-            time.sleep(1)
-
-    # 🔥 FINAL FAIL: Trigger skip logic in the Main Loop
-    print(f"❌ [FAIL] Skipping {symbol} {interval} after 3 attempts.")
-    return None
+    except Exception as e:
+        print(f"⚠️ [PROCESSING_ERROR] Error formatting data for {symbol}: {e}")
+        return None
 
 def get_current_candle(symbol):
     """
-    🚀 UPGRADE (PHASE 8.4): Fetches full OHLC for the latest 1m candle.
-    Essential for the Resolver to detect SL/TP hits via wicks (High/Low).
+    Fetches the most recent 1-minute candle.
+    Used by the resolver to check current market conditions.
     """
-    # Request only 1 candle to keep the payload extremely light
     candles = get_candles(symbol, "1m", limit=1)
-    
-    # ✅ GUARD: Ensure we don't return an index error on empty results
-    if candles is None or len(candles) == 0:
+    if not candles:
         return None
-        
-    # Return the dictionary containing open, high, low, close
     return candles[-1]

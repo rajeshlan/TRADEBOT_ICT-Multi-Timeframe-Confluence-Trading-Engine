@@ -1,27 +1,102 @@
 pairs:
   - symbol: BTCUSDT
-    timeframes: [5m, 30m, 2h, 4h, 1d, 1M]
+    timeframes: [5m, 30m, 2h, 4h, 1d]
 
   - symbol: ETHUSDT
-    timeframes: [5m, 30m, 2h, 4h, 1d, 1M]
+    timeframes: [5m, 30m, 2h, 4h, 1d]
 
   - symbol: SOLUSDT
-    timeframes: [5m, 30m, 2h, 4h, 1d, 1M]
+    timeframes: [5m, 30m, 2h, 4h, 1d]
 
-  - symbol: AAVEUSDT
-    timeframes: [5m, 30m, 2h, 4h, 1d, 1M]
+  - symbol: BNBUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
 
-  - symbol: TAOUSDT
-    timeframes: [5m, 30m, 2h, 4h, 1d, 1M]
+  - symbol: XRPUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
 
-  - symbol: ASTRUSDT
-    timeframes: [5m, 30m, 2h, 4h, 1d, 1M]
+  - symbol: ADAUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
 
-  - symbol: ONDOUSDT
-    timeframes: [5m, 30m, 2h, 4h, 1d, 1M]
+  - symbol: AVAXUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
+
+  - symbol: LINKUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
 
   - symbol: LTCUSDT
-    timeframes: [5m, 30m, 2h, 4h, 1d, 1M]
+    timeframes: [5m, 30m, 2h, 4h, 1d]
+
+  - symbol: AAVEUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
+
+  - symbol: TAOUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
 
   - symbol: FETUSDT
-    timeframes: [5m, 30m, 2h, 4h, 1d, 1M]
+    timeframes: [5m, 30m, 2h, 4h, 1d]
+
+  - symbol: INJUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
+
+  - symbol: RNDRUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
+
+  - symbol: ARBUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
+
+  - symbol: OPUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
+
+  - symbol: SUIUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
+
+  - symbol: SEIUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
+
+  - symbol: ONDOUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
+
+  - symbol: NEARUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
+
+  - symbol: ATOMUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
+
+  - symbol: FILUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
+
+  - symbol: ICPUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
+
+  - symbol: HBARUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
+
+  - symbol: EGLDUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
+
+  - symbol: GRTUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
+
+  - symbol: OCEANUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
+
+  - symbol: WLDUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
+
+  - symbol: ASTRUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
+
+  - symbol: STXUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
+
+  - symbol: IMXUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
+
+  - symbol: DYDXUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
+
+  - symbol: APTUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]
+
+  - symbol: TIAUSDT
+    timeframes: [5m, 30m, 2h, 4h, 1d]

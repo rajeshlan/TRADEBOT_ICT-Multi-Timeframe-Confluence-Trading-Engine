@@ -11,7 +11,7 @@ def format_signal(signal):
     with execution levels, quality tags, and dynamic risk management.
     """
     # Extract score for quality tagging
-    score = signal.get("score", 0)
+    score = signal.get("confluence_score", 0)
 
     # Assign visual tags based on score thresholds
     if score >= 90:
