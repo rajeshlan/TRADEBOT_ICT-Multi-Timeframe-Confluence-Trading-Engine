@@ -3,7 +3,8 @@ import os
 from storage.trade_logger import (
     save_active_trades,
     load_active_trades,
-    append_closed_trade
+    append_closed_trade,
+    log_trade
 )
 from storage.excel_logger import append_trade_to_excel
 from core.trade_state import TradeStateManager
@@ -97,6 +98,21 @@ def resolve_trades(get_candle_func):
                 changes_made = True
                 continue
 
+            # ✅ STEP 6 FIX: PRE-EXECUTION POSITION CHECK
+            # Check if we already have a position open on the exchange for this symbol
+            try:
+                remote_positions = executor.get_positions(symbol)
+                if remote_positions and remote_positions.get("retCode") == 0:
+                    # Check if any position in the list has a size > 0
+                    has_open = any(float(p.get("size", 0)) > 0 for p in remote_positions["result"]["list"])
+                    if has_open:
+                        print(f"⚠️ [SKIP] {symbol} already has an active position on Bybit. Skipping duplicate order.")
+                        state.close_trade(symbol)
+                        changes_made = True
+                        continue
+            except Exception as e:
+                print(f"⚠️ [CHECK_FAILED] Could not verify existing positions for {symbol}: {e}")
+
             side = "Buy" if trade["bias"] == "BULLISH" else "Sell"
             qty = calculate_position_size(trade)
 
@@ -106,7 +122,7 @@ def resolve_trades(get_candle_func):
                 continue
 
             try:
-                # Execution via shared BybitExecutor
+                # 🚀 EXECUTION: Attempting live order via Bybit
                 order = executor.place_market_order(
                     symbol=symbol,
                     side=side,
@@ -114,21 +130,23 @@ def resolve_trades(get_candle_func):
                 )
 
                 if order and order.get("retCode") == 0:
-                    # SUCCESS: Mark as active
                     trade["order_id"] = order["result"]["orderId"]
                     trade["is_active"] = True
-                    trade["status"] = "ACTIVE"
+                    trade["status"] = "OPEN"
                     trade["qty"] = qty
                     trade["activated_at"] = time.time()
                     trade["filled_price"] = candle["close"] 
-                    print(f"🚀 BYBIT ORDER EXECUTED: {symbol} | Qty: {qty}")
+                    
+                    current_balance = executor.get_balance()
+                    log_trade(trade, current_balance)
+                    
+                    print(f"✅ BYBIT ORDER EXECUTED & LOGGED: {symbol} | Qty: {qty}")
                 else:
-                    # ✅ 🔥 FIX: Explicitly ensure is_active is False on failure
                     trade["is_active"] = False
                     trade["status"] = "REJECTED"
                     
                     error_msg = order.get("retMsg") if order else "Connection Timeout"
-                    print(f"❌ BYBIT ORDER REJECTED: {symbol} | {error_msg}")
+                    print(f"❌ BYBIT ORDER FAILED: {symbol} | {error_msg}")
                     
                     state.close_trade(symbol)
                     changes_made = True
@@ -137,9 +155,8 @@ def resolve_trades(get_candle_func):
                 changes_made = True
 
             except Exception as e:
-                # ✅ 🔥 FIX: Handle crash during API call
                 trade["is_active"] = False
-                print(f"❌ BYBIT API ERROR {symbol}: {e}")
+                print(f"❌ BYBIT API EXCEPTION {symbol}: {e}")
                 state.close_trade(symbol)
                 changes_made = True
                 continue
@@ -160,7 +177,7 @@ def resolve_trades(get_candle_func):
                             break 
 
                 if not position_found:
-                    print(f"🏁 POSITION CLOSED: {symbol} (Bybit TP/SL Triggered)")
+                    print(f"🏁 POSITION CLOSED: {symbol} (TP/SL Triggered)")
                     exit_price = trade.get("tp", trade["entry"])
                     closed_trade = close_trade(trade, exit_price, "CLOSED")
                     
@@ -175,7 +192,7 @@ def resolve_trades(get_candle_func):
 
         new_active.append(trade)
 
-    # --- STEP 3: PERSIST ---
+    # --- STEP 3: PERSIST UPDATED STATE ---
     if changes_made:
         try:
             save_active_trades(new_active)

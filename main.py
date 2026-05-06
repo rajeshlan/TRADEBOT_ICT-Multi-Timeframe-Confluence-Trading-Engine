@@ -15,7 +15,7 @@ from engine.signal_manager import SignalManager
 from engine.trade_resolver import resolve_trades
 from core.setup_memory import SetupMemory
 
-# ✅ SHARED EXECUTOR: Import the singleton instance
+# ✅ SHARED EXECUTOR: Singleton instance from core.executor
 from core.executor import executor
 
 from alerts.telegram import TelegramAlerter
@@ -25,24 +25,21 @@ from analytics.performance import get_stats
 from risk.kelly import kelly_fraction
 from core.trade_state import TradeStateManager
 
-# --- 1. CONFIGURATION & CONSTRAINTS (FETCHED FROM .ENV) ---
+# --- 1. CONFIGURATION & CONSTRAINTS ---
 MAX_OPEN_TRADES = int(os.getenv("MAX_OPEN_TRADES", 2))
 MAX_RISK_PER_TRADE = float(os.getenv("MAX_RISK_PER_TRADE", 2.0))
 MIN_SIGNAL_SCORE = int(os.getenv("MIN_SIGNAL_SCORE", 60))
 
-# 🔐 SECURE CREDENTIALS
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 # --- 2. INITIALIZATION ---
-# All components now use the shared 'executor' imported from core.executor
-state = TradeStateManager()  # Tracks symbol activity and counts
+state = TradeStateManager()  
 alerter = TelegramAlerter(BOT_TOKEN, CHAT_ID)
 evaluator = Evaluator()
 manager = SignalManager()
 setup_memory = SetupMemory(cooldown_seconds=3600)
 
-# Load pairs from configuration
 with open("config/pairs.yaml") as f:
     config = yaml.safe_load(f)
 pairs = config["pairs"]
@@ -53,8 +50,8 @@ def run_cycle():
     """
     print(f"\n⏱ Cycle started at {time.strftime('%H:%M:%S')}...")
 
-    # --- PHASE A: RESOLUTION ---
-    # Sync with exchange to update existing trade states
+    # --- PHASE A: RESOLUTION & EXECUTION ---
+    # The resolver now handles both executing pending trades and syncing active ones.
     print("⚖️ Running Trade Resolver & Exchange Sync...")
     resolve_trades(get_current_candle)
 
@@ -66,23 +63,20 @@ def run_cycle():
 
         # 1. Check Global Portfolio Limits
         active_list = load_active_trades()
-        # Count only trades that are actually live on the exchange
         active_count = len([t for t in active_list if t.get("is_active")]) if active_list else 0
         
         if active_count >= MAX_OPEN_TRADES:
             print(f"🛑 [LIMIT] Max trades reached ({active_count}/{MAX_OPEN_TRADES}). Skipping scan.")
             break
 
-        # 2. Check Symbol-Specific State (Local Guard)
+        # 2. Check Symbol-Specific Local State
         if state.is_symbol_active(symbol):
-            print(f"⏳ [ACTIVE] {symbol} already has an open position. Skipping.")
+            print(f"⏳ [ACTIVE] {symbol} already has an open position or pending signal. Skipping.")
             continue
 
         for tf in timeframes:
-            # Fetch data for ICT Analysis (MSS, FVG, Liquidity)
             candles = get_candles(symbol, tf)
             if not candles:
-                print(f"[SKIP] {symbol}-{tf} returned no data.")
                 continue
             
             result = evaluator.run(symbol, tf, candles)
@@ -92,59 +86,50 @@ def run_cycle():
         decision = manager.process(symbol, results)
 
         if decision:
-            # QUALITY FILTER
+            # 4. Filter Quality & Duplicates
             score = decision.get("confluence_score", 0)
-            if score < MIN_SIGNAL_SCORE:
-                print(f"❌ [REJECTED] {symbol} setup too weak (Score: {score}/{MIN_SIGNAL_SCORE})")
+            if score < MIN_SIGNAL_SCORE or setup_memory.is_duplicate(decision):
+                print(f"❌ [REJECTED] {symbol} (Score: {score}) or Duplicate.")
                 continue
 
-            # 4. Duplication Cooldown (Time-based filter)
-            if setup_memory.is_duplicate(decision):
-                print(f"[SKIP] Duplicate setup detected: {symbol}")
-                continue
-
-            # 5. Risk Calculation (Kelly + Hard Cap)
+            # 5. Risk Management
             stats = get_stats()
-            if stats and stats.get("winrate") and stats.get("rr"):
-                kelly = kelly_fraction(stats["winrate"], stats["rr"])
-            else:
-                kelly = 0.02 # Conservative fallback
-
-            # Apply Risk Limits
+            kelly = kelly_fraction(stats["winrate"], stats["rr"]) if stats else 0.02
             risk = min(kelly * 100, MAX_RISK_PER_TRADE)
             decision["risk_pct"] = round(risk, 2)
             
-            # 6. Final Execution Guard (Re-check before logging)
+            # 6. Final State Check
             if state.is_symbol_active(symbol):
                 continue
 
-            # 7. Transmission & Logging
-            msg = format_signal(decision)
-            print(f"🔥 HIGH QUALITY SIGNAL: \n{msg}")
+            # --- PHASE C: SIGNAL NOTIFICATION & LOGGING ---
             
-            # Send Telegram Alert
+            # 1. Format and notify via Telegram
+            msg = format_signal(decision)
+            print(f"🔥 HIGH QUALITY SIGNAL FOUND: {symbol}")
             alerter.send(msg)
 
-            # Log Trade (Initializes balance snapshot for PnL tracking)
-            # ✅ CORRECTED: Uses the shared singleton 'executor'
-            current_balance = executor.get_balance() 
+            # 2. DEFERRED EXECUTION LOGIC
+            # Instead of placing the order here, we log it and let the resolver handle it.
+            current_balance = executor.get_balance()
+            
+            # Record the intent in active_trades.json
             log_trade(decision, current_balance)
             
-            # Lock State locally to prevent duplicate scanning for this symbol
-            state.open_trade(symbol) 
-            print(f"✅ Trade sent to Resolver (Risk: {decision['risk_pct']}%).")
+            # Lock the local state so we don't double-signal
+            state.open_trade(symbol)
+            
+            print(f"📡 SIGNAL LOGGED: {symbol} | Awaiting resolver execution.")
 
     print(f"💤 Scan complete. Resting for 25 seconds...")
     time.sleep(25)
 
-# --- 🔥 GLOBAL WATCHDOG LOOP ---
+# --- GLOBAL WATCHDOG ---
 print("🚀 TRADEBOT_ICT IS LIVE | Monitoring Markets...")
 
 while True:
     try:
         run_cycle()
     except Exception as e:
-        # 🛡️ ANTI-CRASH PROTECTION
         print(f"\n🛑 [CRASH] System Error: {e}")
-        print("🛠️ Restarting engine in 10 seconds...")
         time.sleep(10)
