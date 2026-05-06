@@ -3,8 +3,7 @@ import os
 from storage.trade_logger import (
     save_active_trades,
     load_active_trades,
-    append_closed_trade,
-    log_trade
+    append_closed_trade
 )
 from storage.excel_logger import append_trade_to_excel
 from core.trade_state import TradeStateManager
@@ -15,38 +14,63 @@ from core.executor import executor
 # --- INITIALIZATION ---
 state = TradeStateManager()
 
-def normalize_qty(qty, step=0.001):
-    """Ensures quantity matches exchange step size to avoid 'Invalid Qty' errors."""
-    return round((qty // step) * step, 3)
+# ✅ STEP 1: Load Environment Constraints
+# Defaulting to 2 USDT margin and 3x leverage if not found in .env
+MAX_MARGIN_PER_TRADE = float(os.getenv("MAX_MARGIN_PER_TRADE", 2.0))
+LEVERAGE = int(os.getenv("LEVERAGE", 3))
 
-def calculate_position_size(trade):
-    """Calculates position size with a 5x Notional Safety Cap."""
-    balance = trade.get("balance_snapshot", 100)
-    risk_pct = trade.get("risk_pct", 2) / 100
-
-    risk_amount = balance * risk_pct
-    entry = trade["entry"]
-    sl = trade["sl"]
-
-    sl_distance = abs(entry - sl)
-    if sl_distance <= 0:
+def normalize_qty(qty, symbol=None):
+    """
+    Temporary safe quantity normalization to avoid 'Invalid Qty' errors.
+    """
+    if qty <= 0:
         return 0
 
-    qty = risk_amount / sl_distance
-    max_notional = balance * 5    
-    max_qty_allowed = max_notional / entry
+    # High-price assets: Allow 3 decimal places
+    if symbol in ["BTCUSDT", "ETHUSDT"]:
+        return round(qty, 3)
+
+    # Mid-price assets: Allow 2 decimal places
+    if symbol in ["BNBUSDT", "SOLUSDT"]:
+        return round(qty, 2)
+
+    # Cheap assets / Fallback: Allow 1 decimal place
+    return round(qty, 1)
+
+def calculate_position_size(trade):
+    """
+    Calculates position size based on Fixed Margin and Leverage.
     
-    final_qty = min(qty, max_qty_allowed)
-    normalized_qty = normalize_qty(final_qty)
+    Formula:
+    $$Notional = Margin \times Leverage$$
+    $$Quantity = \frac{Notional}{Entry Price}$$
+    """
+    entry = trade.get("entry", 0)
+    symbol = trade.get("symbol")
+
+    if entry <= 0:
+        print(f"⚠️ [REJECTED] {symbol} - Invalid entry price for sizing.")
+        return 0
+
+    # Step 2: Calculate Notional Value
+    max_position_notional = MAX_MARGIN_PER_TRADE * LEVERAGE
+
+    # Step 3: Calculate Raw Quantity
+    qty = max_position_notional / entry
+    
+    # Step 4: Normalize based on asset type
+    normalized_qty = normalize_qty(qty, symbol)
 
     if normalized_qty <= 0:
-        print(f"⚠️ [REJECTED] {trade['symbol']} - Qty too small after normalization.")
+        print(f"⚠️ [REJECTED] {symbol} - Qty too small after normalization ($Margin: {MAX_MARGIN_PER_TRADE}).")
         return 0
         
     return normalized_qty
 
 def close_trade(trade, exit_price, result):
-    """Finalizes trade data and calculates final PnL."""
+    """
+    Finalizes trade data and calculates final PnL.
+    """
     trade["status"] = "CLOSED"
     trade["is_active"] = False
     trade["closed_at"] = time.strftime('%Y-%m-%d %H:%M:%S', time.localtime())
@@ -98,15 +122,13 @@ def resolve_trades(get_candle_func):
                 changes_made = True
                 continue
 
-            # ✅ STEP 6 FIX: PRE-EXECUTION POSITION CHECK
-            # Check if we already have a position open on the exchange for this symbol
             try:
+                # Check for existing positions to avoid duplicates
                 remote_positions = executor.get_positions(symbol)
                 if remote_positions and remote_positions.get("retCode") == 0:
-                    # Check if any position in the list has a size > 0
                     has_open = any(float(p.get("size", 0)) > 0 for p in remote_positions["result"]["list"])
                     if has_open:
-                        print(f"⚠️ [SKIP] {symbol} already has an active position on Bybit. Skipping duplicate order.")
+                        print(f"⚠️ [SKIP] {symbol} already has an active position on Bybit.")
                         state.close_trade(symbol)
                         changes_made = True
                         continue
@@ -122,14 +144,11 @@ def resolve_trades(get_candle_func):
                 continue
 
             try:
-                # 🚀 EXECUTION: Attempting live order via Bybit
-                order = executor.place_market_order(
-                    symbol=symbol,
-                    side=side,
-                    qty=qty
-                )
+                # 🚀 EXECUTION
+                order = executor.place_market_order(symbol=symbol, side=side, qty=qty)
 
                 if order and order.get("retCode") == 0:
+                    # Update local trade object state
                     trade["order_id"] = order["result"]["orderId"]
                     trade["is_active"] = True
                     trade["status"] = "OPEN"
@@ -137,22 +156,16 @@ def resolve_trades(get_candle_func):
                     trade["activated_at"] = time.time()
                     trade["filled_price"] = candle["close"] 
                     
-                    current_balance = executor.get_balance()
-                    log_trade(trade, current_balance)
-                    
-                    print(f"✅ BYBIT ORDER EXECUTED & LOGGED: {symbol} | Qty: {qty}")
+                    print(f"✅ BYBIT ORDER EXECUTED: {symbol} | Qty: {qty} (Margin: ${MAX_MARGIN_PER_TRADE})")
+                    changes_made = True
                 else:
-                    trade["is_active"] = False
                     trade["status"] = "REJECTED"
-                    
+                    trade["is_active"] = False
                     error_msg = order.get("retMsg") if order else "Connection Timeout"
                     print(f"❌ BYBIT ORDER FAILED: {symbol} | {error_msg}")
-                    
                     state.close_trade(symbol)
                     changes_made = True
                     continue
-
-                changes_made = True
 
             except Exception as e:
                 trade["is_active"] = False
@@ -165,25 +178,27 @@ def resolve_trades(get_candle_func):
         if trade.get("is_active"):
             try:
                 positions = executor.get_positions(symbol)
-                position_found = False
+                exchange_position_found = False
 
                 if positions and positions.get("retCode") == 0:
                     for pos in positions["result"]["list"]:
-                        size = float(pos["size"])
+                        size = float(pos.get("size", 0))
                         if size > 0:
-                            position_found = True
-                            trade["unrealized_pnl"] = float(pos["unrealisedPnl"])
-                            trade["entry_price_real"] = float(pos["avgPrice"])
+                            exchange_position_found = True
+                            trade["unrealized_pnl"] = float(pos.get("unrealisedPnl", 0))
+                            trade["entry_price_real"] = float(pos.get("avgPrice", 0))
                             break 
 
-                if not position_found:
-                    print(f"🏁 POSITION CLOSED: {symbol} (TP/SL Triggered)")
-                    exit_price = trade.get("tp", trade["entry"])
-                    closed_trade = close_trade(trade, exit_price, "CLOSED")
+                if not exchange_position_found:
+                    print(f"📕 POSITION CLOSED ON EXCHANGE: {symbol}")
+                    
+                    exit_price = trade.get("entry_price_real", trade["entry"])
+                    closed_trade = close_trade(trade, exit_price, "MANUAL_CLOSE")
                     
                     append_closed_trade(closed_trade)
                     append_trade_to_excel(closed_trade)
                     state.close_trade(symbol)
+                    
                     changes_made = True
                     continue 
 

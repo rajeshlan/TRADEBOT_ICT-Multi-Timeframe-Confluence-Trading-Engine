@@ -27,43 +27,47 @@ st.set_page_config(
 st_autorefresh(interval=2000, key="datarefresh")
 
 # 3. INITIALIZE EXECUTOR IN SESSION STATE
-# This ensures Streamlit uses the shared connection across all UI refreshes.
 if "executor" not in st.session_state:
     st.session_state.executor = executor
 
-# 4. CACHED API LOGIC (REFACTORED)
-# ttl=5 ensures we only hit the real API once every 5 seconds maximum.
+# 4. CACHED API LOGIC
 @st.cache_data(ttl=5)
 def get_balance_cached():
     """
     Fetch balance from Bybit through the executor. 
     Results are cached for 5 seconds to prevent rate limiting.
-    Includes a safety wrapper to prevent UI crashes during API downtime.
     """
     try:
-        # ✅ FIXED: Safe wrapper for API calls
         balance = st.session_state.executor.get_balance()
     except Exception as e:
-        # Fallback to 0 if the API call fails
         balance = 0
         print(f"⚠️ [DASHBOARD] Balance fetch failed: {e}")
         
     return balance
 
 # 5. DATA LOADING & CALCULATIONS
-active_trades = load_active_trades()
+active_trades = load_active_trades() # Still loaded for background context if needed
 closed_trades = load_closed_trades()
+
+# ✅ LIVE EXCHANGE POSITIONS (Authoritative Source)
+live_positions = executor.get_all_positions()
 
 # Handle Balance with Cache
 current_balance = get_balance_cached()
 
-# Safety Fallback: Use 0.0 if balance retrieval failed or returned None
+# Safety Fallback
 if current_balance is None:
     current_balance = 0.0
 
-floating_pnl = sum(t.get("unrealized_pnl", 0) for t in active_trades)
+# ✅ LIVE CALCULATIONS
+# Equity is calculated as:
+# $$Equity = Balance + \sum Unrealized PnL$$
+floating_pnl = sum(float(p.get("unrealisedPnl", 0)) for p in live_positions)
 closed_pnl = sum(t.get("pnl", 0) for t in closed_trades)
 equity_live = current_balance + floating_pnl
+
+# ✅ TRUE OPEN POSITIONS FROM EXCHANGE
+real_open_positions = len(live_positions)
 
 # 6. SIDEBAR & CONTROLS
 st.sidebar.title("⚙️ CONTROL PANEL")
@@ -90,7 +94,7 @@ m1.metric("Equity (USDT)", f"{round(equity_live, 2)}")
 m2.metric("Floating PnL", f"{round(floating_pnl, 4)}", delta_color="normal")
 m3.metric("Closed PnL", f"{round(closed_pnl, 4)}")
 m4.metric("Balance (USDT)", f"{round(current_balance, 2)}")
-m5.metric("Open Pos.", len(active_trades))
+m5.metric("Open Pos.", real_open_positions)
 
 st.divider()
 
@@ -99,13 +103,54 @@ tab1, tab2, tab3 = st.tabs(["🎯 Active Exposure", "📜 History", "📈 Analyt
 
 with tab1:
     st.subheader("Current Market Exposure")
-    if active_trades:
-        df_active = pd.DataFrame(active_trades)
-        df_active["realized_pnl"] = 0.0
-        cols = ["symbol", "bias", "entry", "status", "unrealized_pnl", "unrealized_pct", "realized_pnl"]
-        st.dataframe(df_active[cols], use_container_width=True)
+    
+    # ✅ LIVE OPEN POSITIONS DIRECTLY FROM BYBIT
+    open_trades = []
+
+    for pos in live_positions:
+        try:
+            size = float(pos.get("size", 0))
+
+            if size <= 0:
+                continue
+
+            side = pos.get("side", "Unknown")
+
+            open_trades.append({
+                "symbol": pos.get("symbol"),
+                "bias": "BULLISH" if side == "Buy" else "BEARISH",
+                "entry": float(pos.get("avgPrice", 0)),
+                "mark_price": float(pos.get("markPrice", 0)),
+                "liq_price": float(pos.get("liqPrice", 0) or 0),
+                "leverage": pos.get("leverage"),
+                "qty": size,
+                "unrealized_pnl": float(pos.get("unrealisedPnl", 0)),
+                "status": "OPEN"
+            })
+
+        except Exception as e:
+            print(f"⚠️ [DASHBOARD_POSITION_PARSE] {e}")
+
+    if open_trades:
+        df_active = pd.DataFrame(open_trades)
+        
+        # Select and order columns for display
+        cols_to_show = [
+            "symbol",
+            "bias",
+            "entry",
+            "mark_price",
+            "liq_price",
+            "leverage",
+            "qty",
+            "unrealized_pnl",
+            "status"
+        ]
+        existing_cols = [c for c in cols_to_show if c in df_active.columns]
+        
+        st.dataframe(df_active[existing_cols], width="stretch")
     else:
-        st.info("No active trades. Scanning setups...")
+        st.info("No active trades currently open on exchange. Scanning for setups...")
 
 with tab2:
     st.subheader(f"Trade History ({len(closed_trades)})")
@@ -115,14 +160,13 @@ with tab2:
             df_closed = df_closed.sort_values("closed_at", ascending=False)
             req_cols = ["symbol", "bias", "entry", "exit_price", "pnl", "pnl_pct", "result"]
             display_cols = [c for c in req_cols if c in df_closed.columns]
-            st.dataframe(df_closed[display_cols], use_container_width=True)
+            st.dataframe(df_closed[display_cols], width="stretch")
     else:
         st.info("No closed trades found.")
 
 with tab3:
     st.subheader("📈 Performance Analytics")
     
-    # Simple Equity Curve Generation
     equity_curve = []
     temp_balance = current_balance - closed_pnl
     for t in closed_trades:
@@ -148,6 +192,7 @@ with st.expander("🛠 Developer System State"):
     st.json({
         "equity_live": equity_live,
         "api_balance": current_balance,
-        "cache_status": "Active (5s TTL)",
-        "env_check": "API KEY FOUND" if os.getenv("BYBIT_API_KEY") else "API KEY MISSING"
+        "active_json_count": len(active_trades),
+        "live_exchange_count": real_open_positions,
+        "cache_status": "Active (5s TTL)"
     })

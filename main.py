@@ -23,7 +23,6 @@ from alerts.formatter import format_signal
 from storage.trade_logger import log_trade, load_active_trades
 from analytics.performance import get_stats
 from risk.kelly import kelly_fraction
-from core.trade_state import TradeStateManager
 
 # --- 1. CONFIGURATION & CONSTRAINTS ---
 MAX_OPEN_TRADES = int(os.getenv("MAX_OPEN_TRADES", 2))
@@ -34,7 +33,6 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 # --- 2. INITIALIZATION ---
-state = TradeStateManager()  
 alerter = TelegramAlerter(BOT_TOKEN, CHAT_ID)
 evaluator = Evaluator()
 manager = SignalManager()
@@ -61,17 +59,32 @@ def run_cycle():
         timeframes = pair["timeframes"]
         results = {}
 
-        # 1. Check Global Portfolio Limits
+        # 1. Check Global Portfolio Limits (Persistent)
         active_list = load_active_trades()
-        active_count = len([t for t in active_list if t.get("is_active")]) if active_list else 0
+        if active_list is None:
+            active_list = []
+
+        active_count = len([
+            t for t in active_list
+            if t.get("status") in ["PENDING", "ACTIVE"]
+        ])
         
         if active_count >= MAX_OPEN_TRADES:
             print(f"🛑 [LIMIT] Max trades reached ({active_count}/{MAX_OPEN_TRADES}). Skipping scan.")
             break
 
-        # 2. Check Symbol-Specific Local State
-        if state.is_symbol_active(symbol):
-            print(f"⏳ [ACTIVE] {symbol} already has an open position or pending signal. Skipping.")
+        # 2. Check Symbol-Specific Persistent State
+        existing_trade = next(
+            (
+                t for t in active_list
+                if t.get("symbol") == symbol
+                and t.get("status") in ["PENDING", "ACTIVE"]
+            ),
+            None
+        )
+
+        if existing_trade:
+            print(f"⏳ [SKIP] {symbol} already exists in active_trades.")
             continue
 
         for tf in timeframes:
@@ -97,10 +110,6 @@ def run_cycle():
             kelly = kelly_fraction(stats["winrate"], stats["rr"]) if stats else 0.02
             risk = min(kelly * 100, MAX_RISK_PER_TRADE)
             decision["risk_pct"] = round(risk, 2)
-            
-            # 6. Final State Check
-            if state.is_symbol_active(symbol):
-                continue
 
             # --- PHASE C: SIGNAL NOTIFICATION & LOGGING ---
             
@@ -110,14 +119,10 @@ def run_cycle():
             alerter.send(msg)
 
             # 2. DEFERRED EXECUTION LOGIC
-            # Instead of placing the order here, we log it and let the resolver handle it.
             current_balance = executor.get_balance()
             
             # Record the intent in active_trades.json
             log_trade(decision, current_balance)
-            
-            # Lock the local state so we don't double-signal
-            state.open_trade(symbol)
             
             print(f"📡 SIGNAL LOGGED: {symbol} | Awaiting resolver execution.")
 
