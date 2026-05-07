@@ -14,58 +14,71 @@ from core.executor import executor
 # --- INITIALIZATION ---
 state = TradeStateManager()
 
-# ✅ STEP 1: Load Environment Constraints
-# Defaulting to 2 USDT margin and 3x leverage if not found in .env
+# ✅ Load Environment Constraints
 MAX_MARGIN_PER_TRADE = float(os.getenv("MAX_MARGIN_PER_TRADE", 2.0))
 LEVERAGE = int(os.getenv("LEVERAGE", 3))
 
 def normalize_qty(qty, symbol=None):
     """
-    Temporary safe quantity normalization to avoid 'Invalid Qty' errors.
+    Refined quantity normalization to prevent 'Invalid Qty' errors on Bybit.
+    Categorizes assets by price tier to match exchange precision requirements.
     """
     if qty <= 0:
         return 0
 
-    # High-price assets: Allow 3 decimal places
-    if symbol in ["BTCUSDT", "ETHUSDT"]:
+    # 💎 HIGH PRICE TOKENS (Precise increments)
+    if symbol in ["BTCUSDT"]:
         return round(qty, 3)
 
-    # Mid-price assets: Allow 2 decimal places
-    if symbol in ["BNBUSDT", "SOLUSDT"]:
+    # 🥈 TOP ALTS
+    elif symbol in ["ETHUSDT", "BNBUSDT", "TAOUSDT", "SOLUSDT"]:
         return round(qty, 2)
 
-    # Cheap assets / Fallback: Allow 1 decimal place
-    return round(qty, 1)
+    # 🥉 MID-TIER ALTS
+    elif symbol in ["AVAXUSDT", "LINKUSDT", "FILUSDT", "DOTUSDT"]:
+        return round(qty, 1)
+
+    # 🪙 LOW PRICE / HIGH SUPPLY TOKENS (Commonly ADA, SEI, ONDO, XRP)
+    # These typically require integer quantities or very low precision
+    else:
+        return float(int(qty))  # Returns as whole number (e.g., 5.0)
 
 def calculate_position_size(trade):
     """
-    Calculates position size based on Fixed Margin and Leverage.
-    
-    Formula:
-    $$Notional = Margin \times Leverage$$
-    $$Quantity = \frac{Notional}{Entry Price}$$
+    Dynamic quantity calculation using:
+    Qty = (Target Margin × Leverage) / Entry
     """
     entry = trade.get("entry", 0)
     symbol = trade.get("symbol")
 
     if entry <= 0:
-        print(f"⚠️ [REJECTED] {symbol} - Invalid entry price for sizing.")
+        print(f"⚠️ [REJECTED] {symbol} - Invalid entry price.")
         return 0
 
-    # Step 2: Calculate Notional Value
-    max_position_notional = MAX_MARGIN_PER_TRADE * LEVERAGE
-
-    # Step 3: Calculate Raw Quantity
-    qty = max_position_notional / entry
-    
-    # Step 4: Normalize based on asset type
-    normalized_qty = normalize_qty(qty, symbol)
-
-    if normalized_qty <= 0:
-        print(f"⚠️ [REJECTED] {symbol} - Qty too small after normalization ($Margin: {MAX_MARGIN_PER_TRADE}).")
-        return 0
+    try:
+        target_margin = MAX_MARGIN_PER_TRADE
+        position_value = target_margin * LEVERAGE
+        raw_qty = position_value / entry
         
-    return normalized_qty
+        # Apply the new precision logic
+        normalized_qty = normalize_qty(raw_qty, symbol)
+
+        if normalized_qty <= 0:
+            print(f"⚠️ [REJECTED] {symbol} - Calculated Qty ({raw_qty:.4f}) rounded to 0.")
+            return 0
+
+        estimated_margin = (normalized_qty * entry) / LEVERAGE
+        print(
+            f"📊 SIZE_CALC | {symbol} | "
+            f"Lev={LEVERAGE}x | "
+            f"Qty={normalized_qty} | "
+            f"Expected Margin=${estimated_margin:.2f}"
+        )
+        return normalized_qty
+
+    except Exception as e:
+        print(f"❌ POSITION SIZE ERROR {symbol}: {e}")
+        return 0
 
 def close_trade(trade, exit_price, result):
     """
@@ -80,13 +93,13 @@ def close_trade(trade, exit_price, result):
     entry = trade.get("filled_price", trade["entry"])
     balance = trade.get("balance_snapshot", 100)
 
+    # Standard PnL calculation
     pnl_value = trade.get("qty", 0) * (exit_price - entry)
     if trade["bias"] == "BEARISH":
         pnl_value = -pnl_value
 
     trade["pnl"] = round(pnl_value, 4)
     trade["pnl_pct"] = round((pnl_value / balance) * 100, 4)
-
     return trade
 
 def resolve_trades(get_candle_func):
@@ -103,6 +116,33 @@ def resolve_trades(get_candle_func):
 
     for trade in active_list:
         symbol = trade["symbol"]
+
+        # --- STEP 0: RECONCILE PENDING ORDERS ---
+        if trade.get("status") == "PENDING":
+            try:
+                open_orders = executor.get_open_orders(symbol)
+                exchange_order_exists = False
+
+                if open_orders and open_orders.get("retCode") == 0:
+                    order_list = open_orders["result"].get("list", [])
+                    local_order_id = trade.get("order_id")
+
+                    if not local_order_id:
+                        exchange_order_exists = True
+                    else:
+                        for order in order_list:
+                            if order.get("orderId") == local_order_id:
+                                exchange_order_exists = True
+                                break
+
+                if not exchange_order_exists:
+                    print(f"🧹 REMOVING STALE PENDING TRADE: {symbol}")
+                    state.close_trade(symbol)
+                    changes_made = True
+                    continue
+
+            except Exception as e:
+                print(f"❌ PENDING RECONCILIATION ERROR {symbol}: {e}")
 
         # --- STEP 1: EXECUTE PENDING TRADES ---
         if not trade.get("order_id"):
@@ -123,7 +163,6 @@ def resolve_trades(get_candle_func):
                 continue
 
             try:
-                # Check for existing positions to avoid duplicates
                 remote_positions = executor.get_positions(symbol)
                 if remote_positions and remote_positions.get("retCode") == 0:
                     has_open = any(float(p.get("size", 0)) > 0 for p in remote_positions["result"]["list"])
@@ -148,7 +187,6 @@ def resolve_trades(get_candle_func):
                 order = executor.place_market_order(symbol=symbol, side=side, qty=qty)
 
                 if order and order.get("retCode") == 0:
-                    # Update local trade object state
                     trade["order_id"] = order["result"]["orderId"]
                     trade["is_active"] = True
                     trade["status"] = "OPEN"
@@ -156,19 +194,25 @@ def resolve_trades(get_candle_func):
                     trade["activated_at"] = time.time()
                     trade["filled_price"] = candle["close"] 
                     
-                    print(f"✅ BYBIT ORDER EXECUTED: {symbol} | Qty: {qty} (Margin: ${MAX_MARGIN_PER_TRADE})")
+                    executor.set_trading_stop(
+                        symbol=symbol,
+                        stop_loss=trade.get("sl"),
+                        take_profit=trade.get("tp")
+                    )
+                    
+                    print(f"✅ BYBIT ORDER EXECUTED: {symbol} | Qty: {qty}")
                     changes_made = True
                 else:
-                    trade["status"] = "REJECTED"
-                    trade["is_active"] = False
+                    # 🔴 PRUNE FAILED ORDERS IMMEDIATELY
                     error_msg = order.get("retMsg") if order else "Connection Timeout"
                     print(f"❌ BYBIT ORDER FAILED: {symbol} | {error_msg}")
+                    print(f"🧹 REMOVING FAILED TRADE FROM ACTIVE STATE: {symbol}")
+                    
                     state.close_trade(symbol)
                     changes_made = True
-                    continue
+                    continue 
 
             except Exception as e:
-                trade["is_active"] = False
                 print(f"❌ BYBIT API EXCEPTION {symbol}: {e}")
                 state.close_trade(symbol)
                 changes_made = True
@@ -191,14 +235,12 @@ def resolve_trades(get_candle_func):
 
                 if not exchange_position_found:
                     print(f"📕 POSITION CLOSED ON EXCHANGE: {symbol}")
-                    
                     exit_price = trade.get("entry_price_real", trade["entry"])
-                    closed_trade = close_trade(trade, exit_price, "MANUAL_CLOSE")
+                    closed_trade = close_trade(trade, exit_price, "EXCHANGE_EXIT")
                     
                     append_closed_trade(closed_trade)
                     append_trade_to_excel(closed_trade)
                     state.close_trade(symbol)
-                    
                     changes_made = True
                     continue 
 

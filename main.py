@@ -49,36 +49,50 @@ def run_cycle():
     print(f"\n⏱ Cycle started at {time.strftime('%H:%M:%S')}...")
 
     # --- PHASE A: RESOLUTION & EXECUTION ---
-    # The resolver now handles both executing pending trades and syncing active ones.
+    # The resolver handles executing pending trades and syncing active ones.
     print("⚖️ Running Trade Resolver & Exchange Sync...")
     resolve_trades(get_current_candle)
 
     # --- PHASE B: SCANNING ---
+    
+    # ✅ STEP 2 FIX: Real-time Exchange Position Check
+    # We query Bybit directly to see how many positions are actually open.
+    try:
+        exchange_positions = executor.get_positions() # Fetches all positions
+        
+        # Filter for positions where size > 0 (actually active)
+        real_open_positions = [
+            p for p in exchange_positions.get("result", {}).get("list", [])
+            if float(p.get("size", 0)) > 0
+        ]
+        
+        active_count = len(real_open_positions)
+        print(f"📡 EXCHANGE CHECK: {active_count} active positions found on Bybit.")
+
+    except Exception as e:
+        print(f"⚠️ [EXCHANGE_ERROR] Could not fetch positions: {e}")
+        # Fallback to JSON if exchange check fails to prevent over-leveraging
+        active_list = load_active_trades() or []
+        active_count = len([t for t in active_list if t.get("is_active")])
+
     for pair in pairs:
         symbol = pair["symbol"]
         timeframes = pair["timeframes"]
         results = {}
 
-        # 1. Check Global Portfolio Limits (Persistent)
-        active_list = load_active_trades()
-        if active_list is None:
-            active_list = []
-
-        active_count = len([
-            t for t in active_list
-            if t.get("status") in ["PENDING", "ACTIVE"]
-        ])
-        
+        # 1. Global Portfolio Limit Check (Exchange Truth)
         if active_count >= MAX_OPEN_TRADES:
             print(f"🛑 [LIMIT] Max trades reached ({active_count}/{MAX_OPEN_TRADES}). Skipping scan.")
             break
 
-        # 2. Check Symbol-Specific Persistent State
+        # 2. Check Symbol-Specific State in JSON
+        # This prevents opening a second trade for a symbol that is already PENDING or ACTIVE
+        active_list = load_active_trades() or []
         existing_trade = next(
             (
                 t for t in active_list
                 if t.get("symbol") == symbol
-                and t.get("status") in ["PENDING", "ACTIVE"]
+                and t.get("status") in ["PENDING", "OPEN", "ACTIVE"]
             ),
             None
         )
@@ -107,8 +121,8 @@ def run_cycle():
 
             # 5. Risk Management
             stats = get_stats()
-            kelly = kelly_fraction(stats["winrate"], stats["rr"]) if stats else 0.02
-            risk = min(kelly * 100, MAX_RISK_PER_TRADE)
+            kelly_val = kelly_fraction(stats["winrate"], stats["rr"]) if stats else 0.02
+            risk = min(kelly_val * 100, MAX_RISK_PER_TRADE)
             decision["risk_pct"] = round(risk, 2)
 
             # --- PHASE C: SIGNAL NOTIFICATION & LOGGING ---
@@ -123,6 +137,10 @@ def run_cycle():
             
             # Record the intent in active_trades.json
             log_trade(decision, current_balance)
+            
+            # Since we just logged a trade that will become active, 
+            # increment active_count to prevent multiple entries in one cycle
+            active_count += 1
             
             print(f"📡 SIGNAL LOGGED: {symbol} | Awaiting resolver execution.")
 

@@ -143,6 +143,29 @@ class BybitExecutor:
             print(f"❌ [FETCH_FAIL] {symbol}: {e}")
             return None
 
+    def get_open_orders(self, symbol=None):
+        """
+        Fetch currently OPEN exchange orders.
+        Used for pending-order reconciliation.
+        """
+        try:
+            payload = {
+                "category": "linear"
+            }
+
+            if symbol:
+                payload["symbol"] = symbol
+
+            return self._signed_request(
+                "GET",
+                "/v5/order/realtime",
+                payload
+            )
+
+        except Exception as e:
+            print(f"❌ [OPEN_ORDERS_FAIL] {symbol}: {e}")
+            return None
+
     def get_all_positions(self):
         """
         Fetch ALL active linear positions from Bybit.
@@ -164,7 +187,6 @@ class BybitExecutor:
 
             positions = response.get("result", {}).get("list", [])
 
-            # Filter out entries where size is 0 (closed positions history)
             live_positions = [
                 p for p in positions
                 if float(p.get("size", 0)) > 0
@@ -202,4 +224,38 @@ class BybitExecutor:
             return response
         except Exception as e:
             print(f"❌ [ORDER_FAIL] {symbol}: {e}")
+            return None 
+
+    def set_trading_stop(self, symbol, stop_loss=None, take_profit=None):
+        """
+        Sets exchange-native TP/SL on an active position.
+        """
+        try:
+            payload = {
+                "category": "linear",
+                "symbol": symbol,
+                "tpslMode": "Full"
+            }
+
+            if stop_loss:
+                payload["stopLoss"] = str(stop_loss)
+
+            if take_profit:
+                payload["takeProfit"] = str(take_profit)
+
+            response = self._signed_request(
+                "POST",
+                "/v5/position/trading-stop",
+                payload
+            )
+
+            if response and response.get("retCode") == 0:
+                print(f"✅ TP/SL SET: {symbol}")
+            else:
+                print(f"❌ TP/SL FAILED: {response}")
+
+            return response
+
+        except Exception as e:
+            print(f"❌ [TP_SL_FAIL] {symbol}: {e}")
             return None

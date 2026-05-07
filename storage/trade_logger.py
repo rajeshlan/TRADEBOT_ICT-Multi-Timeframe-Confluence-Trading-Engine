@@ -92,8 +92,11 @@ def log_trade(signal, current_balance):
         "rr_ratio": round(rr_calc, 2),
         "risk_pct": min(signal.get("risk", 2), 3), # Cap risk at 3%
         "execution_type": signal.get("mode", "LIVE"),
+        
+        # 🔥 BOT OWNERSHIP TAG: Distinguishes auto-trades from manual ones
+        "bot_managed": True,
 
-        # ✅ STATE TRACKING (Reverted Fix)
+        # ✅ STATE TRACKING
         "status": "PENDING",           # PENDING = Signal created, waiting for Bybit Order
         "is_active": False,            # False = Not yet filled on exchange
         "order_id": None,              # Populated by BybitExecutor
@@ -134,6 +137,7 @@ def append_closed_trade(trade):
         CLOSED_FILE.write_text("[]")
 
     try:
+        # Use _safe_load logic or similar robust reading here
         with open(CLOSED_FILE, "r") as f:
             content = f.read().strip()
             closed = json.loads(content) if content else []
