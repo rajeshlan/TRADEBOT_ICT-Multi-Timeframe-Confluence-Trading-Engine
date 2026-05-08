@@ -55,6 +55,16 @@ floating_pnl = round(sum(float(p.get("unrealisedPnl", 0)) for p in live_position
 closed_pnl = sum(t.get("pnl", 0) for t in closed_trades)
 equity_live = current_balance + floating_pnl
 
+# ✅ EXPOSURE & RISK CALCULATIONS
+total_exposure = round(
+    sum(abs(float(p.get("positionValue", 0))) for p in live_positions),
+    2
+)
+
+margin_ratio = 0
+if equity_live > 0:
+    margin_ratio = total_exposure / equity_live
+
 # ✅ DESYNC LOGIC
 real_open_positions = len([
     p for p in live_positions
@@ -68,19 +78,30 @@ json_open_positions = len([
 # 6. MAIN UI DISPLAY
 st.title("📊 TRADEBOT PERFORMANCE DASHBOARD")
 
-# Desync Warning
+# --- WARNINGS SECTION ---
+# A. Desync Warning
 if json_open_positions != real_open_positions:
     st.warning(
         f"⚠️ STATE DESYNC | Local JSON: {json_open_positions} | Exchange Actual: {real_open_positions}"
     )
 
-# Top Metrics Row
-m1, m2, m3, m4, m5 = st.columns(5)
+# B. Margin Exposure Warning
+if margin_ratio >= 4:
+    st.error(f"🚨 HIGH RISK EXPOSURE | Margin Ratio: {round(margin_ratio, 2)}x")
+elif margin_ratio >= 2:
+    st.warning(f"⚠️ Elevated Exposure | Margin Ratio: {round(margin_ratio, 2)}x")
+else:
+    st.success(f"✅ Exposure Healthy | Margin Ratio: {round(margin_ratio, 2)}x")
+
+
+# --- TOP METRICS ROW ---
+m1, m2, m3, m4, m5, m6 = st.columns(6)
 m1.metric("Equity (USDT)", f"{round(equity_live, 2)}")
 m2.metric("Floating PnL", f"{floating_pnl}", delta_color="normal")
 m3.metric("Closed PnL", f"{round(closed_pnl, 4)}")
 m4.metric("Balance (USDT)", f"{round(current_balance, 2)}")
 m5.metric("Open Pos.", real_open_positions)
+m6.metric("Exposure (USDT)", f"{total_exposure}")
 
 st.divider()
 
@@ -131,7 +152,24 @@ with tab1:
                     "Lev": p.get("leverage")
                 })
             except: continue
-        st.dataframe(pd.DataFrame(exposure_rows), use_container_width=True, hide_index=True)
+        
+        # ✅ STYLED DATAFRAME
+        df_exposure = pd.DataFrame(exposure_rows)
+
+        def color_side(val):
+            if str(val).lower() == "buy":
+                return "color: #00ff88; font-weight: bold;"
+            elif str(val).lower() == "sell":
+                return "color: #ff4b4b; font-weight: bold;"
+            return ""
+
+        styled_df = df_exposure.style.map(color_side, subset=["Side"])
+
+        st.dataframe(
+            styled_df,
+            use_container_width=True,
+            hide_index=True
+        )
 
 with tab2:
     st.subheader("Live TP/SL and Pending Orders")
@@ -184,5 +222,6 @@ with st.expander("🛠 Developer System State"):
         "active_json_count": json_open_positions,
         "exchange_pos_count": real_open_positions,
         "open_orders_count": len(open_orders),
+        "margin_ratio": margin_ratio,
         "desync": json_open_positions != real_open_positions
     })
