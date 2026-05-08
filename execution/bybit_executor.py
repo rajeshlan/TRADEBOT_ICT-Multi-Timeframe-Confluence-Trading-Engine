@@ -49,7 +49,7 @@ class BybitExecutor:
         self.api_secret = api_secret or os.getenv("BYBIT_API_SECRET")
         self.base_url = "https://api.bybit.com"
 
-        # Public client used only for diagnostic data
+        # Public client used only for diagnostic data (server time)
         self.client = HTTP(testnet=False) 
         self.time_sync = ServerTimeSync(self.client)
         
@@ -105,52 +105,74 @@ class BybitExecutor:
     def get_positions(self, symbol=None):
         """Fetches raw positions. If symbol is None, returns all linear positions."""
         try:
-            payload = {"category": "linear"}
+            # ✅ FIX 1: settleCoin="USDT" is mandatory for Unified Trading Accounts
+            payload = {
+                "category": "linear",
+                "settleCoin": "USDT"
+            }
             if symbol:
                 payload["symbol"] = symbol
 
-            return self._signed_request("GET", "/v5/position/list", payload)
+            response = self._signed_request("GET", "/v5/position/list", payload)
+            return response if response else {}
+            
         except Exception as e:
-            print(f"❌ [FETCH_FAIL] {symbol if symbol else 'ALL'}: {e}")
-            return None
+            print(f"❌ GET POSITIONS FAIL [{symbol if symbol else 'ALL'}]: {e}")
+            return {}
 
     def get_all_positions(self):
-        """Returns ONLY active open positions as a clean list."""
+        """
+        Returns ONLY active open positions as a clean, standardized list.
+        Detects positions based on size or floating PnL.
+        """
         try:
             response = self.get_positions()
+            raw_positions = response.get("result", {}).get("list", [])
+            
+            # ✅ DEBUG STEP: Print raw output to terminal to verify Bybit is returning data
+            print(f"🔍 [DEBUG] Raw Positions Fetched: {len(raw_positions)}")
+            if raw_positions:
+                print(f"🔍 [DEBUG] Sample Position: {raw_positions[0].get('symbol')} | Size: {raw_positions[0].get('size')}")
 
-            if not response or response.get("retCode") != 0:
-                return []
+            clean_positions = []
 
-            positions = response.get("result", {}).get("list", [])
-            active_positions = []
-
-            for pos in positions:
+            for pos in raw_positions:
                 try:
-                    size = float(pos.get("size", 0))
-                    if size > 0:
-                        active_positions.append(pos)
-                except:
-                    continue
+                    size = abs(float(pos.get("size", 0)))
+                    unrealized = float(pos.get("unrealisedPnl", 0))
 
-            return active_positions
+                    # Logic: If size exists OR PnL is non-zero, it's an active trade
+                    if size > 0 or abs(unrealized) > 0:
+                        clean_positions.append({
+                            "symbol": pos.get("symbol"),
+                            "side": pos.get("side"),
+                            "size": size,
+                            "avgPrice": float(pos.get("avgPrice", 0)),
+                            "markPrice": float(pos.get("markPrice", 0)),
+                            "liqPrice": pos.get("liqPrice"),
+                            "unrealisedPnl": unrealized,
+                            "positionValue": float(pos.get("positionValue", 0)),
+                            "takeProfit": pos.get("takeProfit"),
+                            "stopLoss": pos.get("stopLoss"),
+                            "leverage": pos.get("leverage"),
+                            "raw": pos
+                        })
+                except Exception as inner_e:
+                    print(f"⚠️ POSITION PARSE FAIL: {inner_e}")
 
+            return clean_positions
         except Exception as e:
             print(f"❌ [GET_ALL_POSITIONS_FAIL] {e}")
             return []
 
     def get_balance(self):
-        """
-        Fetches the real-time USDT Equity for the Unified account.
-        Equity = Wallet Balance + Unrealized PnL.
-        """
+        """Fetches the real-time USDT Equity for the Unified account."""
         try:
             response = self._signed_request(
                 "GET", 
                 "/v5/account/wallet-balance", 
                 {"accountType": "UNIFIED"}
             )
-
             if not response or response.get("retCode") != 0:
                 return 0.0
 
@@ -158,36 +180,38 @@ class BybitExecutor:
             if not accounts:
                 return 0.0
 
-            # Navigate the coins list to find USDT
             coins = accounts[0].get("coin", [])
             for coin in coins:
                 if coin.get("coin") == "USDT":
-                    # ✅ FIX 5: Use 'equity' to include floating PnL
-                    # Fallback to walletBalance if equity is missing
-                    return float(
-                        coin.get(
-                            "equity", 
-                            coin.get("walletBalance", 0)
-                        )
-                    )
-
+                    # Priority: Equity (Balance + PnL)
+                    return float(coin.get("equity", coin.get("walletBalance", 0)))
             return 0.0
-
         except Exception as e:
             print(f"❌ [BALANCE_FAIL] {e}")
             return 0.0
 
     def get_open_orders(self, symbol=None):
-        """Fetch currently OPEN exchange orders."""
+        """
+        ✅ FIX 2: Fetches currently active orders (Limit, TP, SL).
+        Requires settleCoin="USDT" to accurately query the Unified Margin pool.
+        """
         try:
-            payload = {"category": "linear"}
+            payload = {
+                "category": "linear",
+                "settleCoin": "USDT" 
+            }
             if symbol:
                 payload["symbol"] = symbol
 
-            return self._signed_request("GET", "/v5/order/realtime", payload)
+            response = self._signed_request("GET", "/v5/order/realtime", payload)
+            
+            if not response or response.get("retCode") != 0:
+                return []
+                
+            return response.get("result", {}).get("list", [])
         except Exception as e:
-            print(f"❌ [OPEN_ORDERS_FAIL] {symbol}: {e}")
-            return None
+            print(f"❌ [OPEN_ORDERS_FAIL] {e}")
+            return []
 
     def place_market_order(self, symbol, side, qty):
         """Executes a market order."""
