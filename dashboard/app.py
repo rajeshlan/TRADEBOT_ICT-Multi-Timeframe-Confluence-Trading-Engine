@@ -46,7 +46,7 @@ def get_balance_cached():
     return balance
 
 # 5. DATA LOADING & CALCULATIONS
-active_trades = load_active_trades() # Still loaded for background context if needed
+active_trades = load_active_trades()
 closed_trades = load_closed_trades()
 
 # ✅ LIVE EXCHANGE POSITIONS (Authoritative Source)
@@ -60,16 +60,41 @@ if current_balance is None:
     current_balance = 0.0
 
 # ✅ LIVE CALCULATIONS
-# Equity is calculated as:
-# $$Equity = Balance + \sum Unrealized PnL$$
 floating_pnl = sum(float(p.get("unrealisedPnl", 0)) for p in live_positions)
 closed_pnl = sum(t.get("pnl", 0) for t in closed_trades)
 equity_live = current_balance + floating_pnl
 
-# ✅ TRUE OPEN POSITIONS FROM EXCHANGE
+# ✅ FIX 2 & 3: DESYNC DETECTION LOGIC
 real_open_positions = len(live_positions)
 
-# 6. SIDEBAR & CONTROLS
+# Calculate clean count from local JSON (Filtering out closed/failed)
+json_open_positions = len([
+    t for t in active_trades
+    if t.get("status") in ["PENDING", "OPEN", "ACTIVE"]
+])
+
+# 6. MAIN UI DISPLAY
+st.title("📊 TRADEBOT PERFORMANCE DASHBOARD")
+
+# ✅ FIX 3: Force UI to show Desync Warnings
+if json_open_positions != real_open_positions:
+    st.warning(
+        f"⚠️ STATE DESYNC DETECTED | "
+        f"Local JSON Intent: {json_open_positions} trades | "
+        f"Exchange Reality: {real_open_positions} positions"
+    )
+
+# Metrics Display
+m1, m2, m3, m4, m5 = st.columns(5)
+m1.metric("Equity (USDT)", f"{round(equity_live, 2)}")
+m2.metric("Floating PnL", f"{round(floating_pnl, 4)}", delta_color="normal")
+m3.metric("Closed PnL", f"{round(closed_pnl, 4)}")
+m4.metric("Balance (USDT)", f"{round(current_balance, 2)}")
+m5.metric("Open Pos.", real_open_positions)
+
+st.divider()
+
+# 7. SIDEBAR & CONTROLS
 st.sidebar.title("⚙️ CONTROL PANEL")
 if st.sidebar.button("🗑 RESET ALL TRADES"):
     for file in ["active_trades.json", "closed_trades.json", "trades.json"]:
@@ -85,37 +110,19 @@ st.sidebar.divider()
 st.sidebar.success("Live Engine: CONNECTED")
 st.sidebar.info(f"Last UI Sync: {time.strftime('%H:%M:%S')}")
 
-# 7. MAIN UI DISPLAY
-st.title("📊 TRADEBOT PERFORMANCE DASHBOARD")
-
-# Metrics Display
-m1, m2, m3, m4, m5 = st.columns(5)
-m1.metric("Equity (USDT)", f"{round(equity_live, 2)}")
-m2.metric("Floating PnL", f"{round(floating_pnl, 4)}", delta_color="normal")
-m3.metric("Closed PnL", f"{round(closed_pnl, 4)}")
-m4.metric("Balance (USDT)", f"{round(current_balance, 2)}")
-m5.metric("Open Pos.", real_open_positions)
-
-st.divider()
-
 # 8. TABS INTERFACE
 tab1, tab2, tab3 = st.tabs(["🎯 Active Exposure", "📜 History", "📈 Analytics"])
 
 with tab1:
-    st.subheader("Current Market Exposure")
+    st.subheader("Current Market Exposure (Exchange Data)")
     
-    # ✅ LIVE OPEN POSITIONS DIRECTLY FROM BYBIT
     open_trades = []
-
     for pos in live_positions:
         try:
             size = float(pos.get("size", 0))
-
-            if size <= 0:
-                continue
+            if size <= 0: continue
 
             side = pos.get("side", "Unknown")
-
             open_trades.append({
                 "symbol": pos.get("symbol"),
                 "bias": "BULLISH" if side == "Buy" else "BEARISH",
@@ -127,30 +134,16 @@ with tab1:
                 "unrealized_pnl": float(pos.get("unrealisedPnl", 0)),
                 "status": "OPEN"
             })
-
         except Exception as e:
             print(f"⚠️ [DASHBOARD_POSITION_PARSE] {e}")
 
     if open_trades:
         df_active = pd.DataFrame(open_trades)
-        
-        # Select and order columns for display
-        cols_to_show = [
-            "symbol",
-            "bias",
-            "entry",
-            "mark_price",
-            "liq_price",
-            "leverage",
-            "qty",
-            "unrealized_pnl",
-            "status"
-        ]
+        cols_to_show = ["symbol", "bias", "entry", "mark_price", "leverage", "qty", "unrealized_pnl"]
         existing_cols = [c for c in cols_to_show if c in df_active.columns]
-        
-        st.dataframe(df_active[existing_cols], width="stretch")
+        st.dataframe(df_active[existing_cols], use_container_width=True)
     else:
-        st.info("No active trades currently open on exchange. Scanning for setups...")
+        st.info("No active positions found on exchange.")
 
 with tab2:
     st.subheader(f"Trade History ({len(closed_trades)})")
@@ -158,15 +151,14 @@ with tab2:
         df_closed = pd.DataFrame(closed_trades)
         if not df_closed.empty:
             df_closed = df_closed.sort_values("closed_at", ascending=False)
-            req_cols = ["symbol", "bias", "entry", "exit_price", "pnl", "pnl_pct", "result"]
+            req_cols = ["symbol", "bias", "entry", "exit_price", "pnl", "result"]
             display_cols = [c for c in req_cols if c in df_closed.columns]
-            st.dataframe(df_closed[display_cols], width="stretch")
+            st.dataframe(df_closed[display_cols], use_container_width=True)
     else:
-        st.info("No closed trades found.")
+        st.info("No history available.")
 
 with tab3:
     st.subheader("📈 Performance Analytics")
-    
     equity_curve = []
     temp_balance = current_balance - closed_pnl
     for t in closed_trades:
@@ -177,7 +169,6 @@ with tab3:
         st.line_chart(pd.DataFrame({"Equity": equity_curve}))
     
     if closed_trades:
-        st.divider()
         pair_stats = compute_pair_stats(closed_trades)
         c1, c2 = st.columns(2)
         with c1:
@@ -192,7 +183,9 @@ with st.expander("🛠 Developer System State"):
     st.json({
         "equity_live": equity_live,
         "api_balance": current_balance,
-        "active_json_count": len(active_trades),
-        "live_exchange_count": real_open_positions,
-        "cache_status": "Active (5s TTL)"
+        # ✅ FIX 2: Using Clean counts in debugger
+        "active_json_intent_count": json_open_positions,
+        "live_exchange_actual_count": real_open_positions,
+        "cache_status": "Active (5s TTL)",
+        "desync_status": json_open_positions != real_open_positions
     })

@@ -114,6 +114,14 @@ def log_trade(signal, current_balance):
         "candles_seen": 0
     }
 
+    # ✅ PHASE 1A — SETUP MEMORY SNAPSHOT
+    # This is called before the trade is persisted or modified by the executor.
+    try:
+        from core.setup_memory import register_signal_setup
+        register_signal_setup(trade)
+    except Exception as e:
+        print(f"[SETUP_MEMORY_ERROR] {e}")
+
     # 2. Update Master Ledger (Atomic Write)
     all_trades = load_trades()
     all_trades.append(trade)

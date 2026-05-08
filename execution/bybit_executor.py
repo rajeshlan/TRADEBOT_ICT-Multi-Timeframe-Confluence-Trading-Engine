@@ -12,8 +12,8 @@ load_dotenv()
 
 class ServerTimeSync:
     """
-    Helper utility to calculate and maintain the offset 
-    between local system time and Bybit server time.
+    Utility to sync local clock with Bybit server time to avoid 
+    timestamp errors during signed requests.
     """
     def __init__(self, client):
         self.client = client
@@ -30,9 +30,9 @@ class ServerTimeSync:
             
             local_time_ms = int(time.time() * 1000)
             self.local_offset = server_time_ms - local_time_ms
-            print(f"⏰ [TIME_SYNC] Clock Offset Detected: {self.local_offset}ms")
+            print(f"⏰ [TIME_SYNC] Offset: {self.local_offset}ms")
         except Exception as e:
-            print(f"⚠️ [TIME_SYNC] Diagnostic sync failed: {e}")
+            print(f"⚠️ [TIME_SYNC] Failed: {e}")
 
     def now(self):
         """Returns the synchronized server time in milliseconds."""
@@ -41,7 +41,7 @@ class ServerTimeSync:
 class BybitExecutor:
     """
     Bybit V5 Executor: Custom Signer Mode.
-    Uses 'requests' for all private endpoints to ensure timestamp reliability.
+    Handles authentication and private endpoints for Trading and Account data.
     """
 
     def __init__(self, api_key=None, api_secret=None):
@@ -49,9 +49,8 @@ class BybitExecutor:
         self.api_secret = api_secret or os.getenv("BYBIT_API_SECRET")
         self.base_url = "https://api.bybit.com"
 
-        # Pybit kept ONLY for public/diagnostic data
+        # Public client used only for diagnostic data
         self.client = HTTP(testnet=False) 
-        
         self.time_sync = ServerTimeSync(self.client)
         
         self._last_balance_call = 0
@@ -61,7 +60,7 @@ class BybitExecutor:
 
     def _signed_request(self, method, endpoint, payload=None):
         """
-        Generates V5 signatures and executes the request.
+        Generates V5 signatures and executes the request via 'requests'.
         """
         try:
             payload = payload or {}
@@ -103,107 +102,95 @@ class BybitExecutor:
             print(f"❌ Signed Request Error: {e}")
             return None
 
-    def get_balance(self):
-        """Fetches the real wallet balance for the Unified account."""
-        current_time = time.time()
-        if current_time - self._last_balance_call < 5:
-            return self._cached_balance
-
-        self._last_balance_call = current_time
-
+    def get_positions(self, symbol=None):
+        """Fetches raw positions. If symbol is None, returns all linear positions."""
         try:
-            res = self._signed_request(
-                "GET",
-                "/v5/account/wallet-balance",
-                {"accountType": "UNIFIED"}
-            )
-
-            if not res or res.get("retCode") != 0:
-                return self._cached_balance
-
-            coins = res["result"]["list"][0]["coin"]
-            for c in coins:
-                if c["coin"] == "USDT":
-                    self._cached_balance = float(c["walletBalance"])
-                    return self._cached_balance
-
-            return self._cached_balance
-        except Exception as e:
-            return self._cached_balance
-
-    def get_positions(self, symbol):
-        """Fetch position details for a specific symbol."""
-        try:
-            return self._signed_request(
-                "GET",
-                "/v5/position/list",
-                {"category": "linear", "symbol": symbol}
-            )
-        except Exception as e:
-            print(f"❌ [FETCH_FAIL] {symbol}: {e}")
-            return None
-
-    def get_open_orders(self, symbol=None):
-        """
-        Fetch currently OPEN exchange orders.
-        Used for pending-order reconciliation.
-        """
-        try:
-            payload = {
-                "category": "linear"
-            }
-
+            payload = {"category": "linear"}
             if symbol:
                 payload["symbol"] = symbol
 
-            return self._signed_request(
-                "GET",
-                "/v5/order/realtime",
-                payload
+            return self._signed_request("GET", "/v5/position/list", payload)
+        except Exception as e:
+            print(f"❌ [FETCH_FAIL] {symbol if symbol else 'ALL'}: {e}")
+            return None
+
+    def get_all_positions(self):
+        """Returns ONLY active open positions as a clean list."""
+        try:
+            response = self.get_positions()
+
+            if not response or response.get("retCode") != 0:
+                return []
+
+            positions = response.get("result", {}).get("list", [])
+            active_positions = []
+
+            for pos in positions:
+                try:
+                    size = float(pos.get("size", 0))
+                    if size > 0:
+                        active_positions.append(pos)
+                except:
+                    continue
+
+            return active_positions
+
+        except Exception as e:
+            print(f"❌ [GET_ALL_POSITIONS_FAIL] {e}")
+            return []
+
+    def get_balance(self):
+        """
+        Fetches the real-time USDT Equity for the Unified account.
+        Equity = Wallet Balance + Unrealized PnL.
+        """
+        try:
+            response = self._signed_request(
+                "GET", 
+                "/v5/account/wallet-balance", 
+                {"accountType": "UNIFIED"}
             )
 
+            if not response or response.get("retCode") != 0:
+                return 0.0
+
+            accounts = response.get("result", {}).get("list", [])
+            if not accounts:
+                return 0.0
+
+            # Navigate the coins list to find USDT
+            coins = accounts[0].get("coin", [])
+            for coin in coins:
+                if coin.get("coin") == "USDT":
+                    # ✅ FIX 5: Use 'equity' to include floating PnL
+                    # Fallback to walletBalance if equity is missing
+                    return float(
+                        coin.get(
+                            "equity", 
+                            coin.get("walletBalance", 0)
+                        )
+                    )
+
+            return 0.0
+
+        except Exception as e:
+            print(f"❌ [BALANCE_FAIL] {e}")
+            return 0.0
+
+    def get_open_orders(self, symbol=None):
+        """Fetch currently OPEN exchange orders."""
+        try:
+            payload = {"category": "linear"}
+            if symbol:
+                payload["symbol"] = symbol
+
+            return self._signed_request("GET", "/v5/order/realtime", payload)
         except Exception as e:
             print(f"❌ [OPEN_ORDERS_FAIL] {symbol}: {e}")
             return None
 
-    def get_all_positions(self):
-        """
-        Fetch ALL active linear positions from Bybit.
-        Used by dashboard for authoritative exchange state.
-        """
-        try:
-            response = self._signed_request(
-                "GET",
-                "/v5/position/list",
-                {
-                    "category": "linear",
-                    "settleCoin": "USDT"
-                }
-            )
-
-            if not response or response.get("retCode") != 0:
-                print(f"❌ [POSITIONS_FAIL] {response.get('retMsg') if response else 'No response'}")
-                return []
-
-            positions = response.get("result", {}).get("list", [])
-
-            live_positions = [
-                p for p in positions
-                if float(p.get("size", 0)) > 0
-            ]
-
-            return live_positions
-
-        except Exception as e:
-            print(f"❌ [ALL_POSITIONS_ERROR] {e}")
-            return []
-
     def place_market_order(self, symbol, side, qty):
-        """Executes a market order via the custom signer."""
-        if qty <= 0:
-            print(f"⚠️ [REJECTED] {symbol} Qty invalid.")
-            return None
-
+        """Executes a market order."""
         try:
             payload = {
                 "category": "linear",
@@ -213,49 +200,19 @@ class BybitExecutor:
                 "qty": str(qty),
                 "timeInForce": "IOC"
             }
-
-            response = self._signed_request("POST", "/v5/order/create", payload)
-
-            if response and response.get("retCode") == 0:
-                print(f"🚀 ORDER PLACED: {symbol} {side} {qty}")
-            else:
-                print(f"❌ ORDER FAILED: {response}")
-
-            return response
+            return self._signed_request("POST", "/v5/order/create", payload)
         except Exception as e:
             print(f"❌ [ORDER_FAIL] {symbol}: {e}")
             return None 
 
     def set_trading_stop(self, symbol, stop_loss=None, take_profit=None):
-        """
-        Sets exchange-native TP/SL on an active position.
-        """
+        """Sets exchange-native TP/SL on an active position."""
         try:
-            payload = {
-                "category": "linear",
-                "symbol": symbol,
-                "tpslMode": "Full"
-            }
+            payload = {"category": "linear", "symbol": symbol, "tpslMode": "Full"}
+            if stop_loss: payload["stopLoss"] = str(stop_loss)
+            if take_profit: payload["takeProfit"] = str(take_profit)
 
-            if stop_loss:
-                payload["stopLoss"] = str(stop_loss)
-
-            if take_profit:
-                payload["takeProfit"] = str(take_profit)
-
-            response = self._signed_request(
-                "POST",
-                "/v5/position/trading-stop",
-                payload
-            )
-
-            if response and response.get("retCode") == 0:
-                print(f"✅ TP/SL SET: {symbol}")
-            else:
-                print(f"❌ TP/SL FAILED: {response}")
-
-            return response
-
+            return self._signed_request("POST", "/v5/position/trading-stop", payload)
         except Exception as e:
             print(f"❌ [TP_SL_FAIL] {symbol}: {e}")
             return None

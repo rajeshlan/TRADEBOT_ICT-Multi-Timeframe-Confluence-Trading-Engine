@@ -1,0 +1,2 @@
+from core.setup_memory.setup_registry import register_signal_setup
+from core.setup_memory.duplicate_guard import SetupMemory
