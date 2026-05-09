@@ -19,3 +19,9 @@
 {"event_type": "TELEMETRY", "timestamp": 1778313630.8783476, "trade_id": "XRPUSDT_1778310157", "symbol": "XRPUSDT", "unrealized_pnl": -0.0462, "entry_price_real": 1.4264, "status": "OPEN"}
 {"event_type": "TELEMETRY", "timestamp": 1778313631.257771, "trade_id": "ARBUSDT_1778310172", "symbol": "ARBUSDT", "unrealized_pnl": -0.040667, "entry_price_real": 0.14682106, "status": "OPEN"}
 {"event_type": "TELEMETRY", "timestamp": 1778313631.6290195, "trade_id": "SUIUSDT_1778310175", "symbol": "SUIUSDT", "unrealized_pnl": 0.044, "entry_price_real": 1.0698, "status": "OPEN"}
+{"event_type": "TELEMETRY", "timestamp": 1778313657.8300033, "trade_id": "XRPUSDT_1778310157", "symbol": "XRPUSDT", "unrealized_pnl": -0.0476, "entry_price_real": 1.4264, "status": "OPEN"}
+{"event_type": "TELEMETRY", "timestamp": 1778313658.2076766, "trade_id": "ARBUSDT_1778310172", "symbol": "ARBUSDT", "unrealized_pnl": -0.042427, "entry_price_real": 0.14682106, "status": "OPEN"}
+{"event_type": "TELEMETRY", "timestamp": 1778313658.5534422, "trade_id": "SUIUSDT_1778310175", "symbol": "SUIUSDT", "unrealized_pnl": 0.028, "entry_price_real": 1.0698, "status": "OPEN"}
+{"event_type": "TELEMETRY", "timestamp": 1778313684.8166673, "trade_id": "XRPUSDT_1778310157", "symbol": "XRPUSDT", "unrealized_pnl": -0.049, "entry_price_real": 1.4264, "status": "OPEN"}
+{"event_type": "TELEMETRY", "timestamp": 1778313685.190904, "trade_id": "ARBUSDT_1778310172", "symbol": "ARBUSDT", "unrealized_pnl": 0.003333, "entry_price_real": 0.14682106, "status": "OPEN"}
+{"event_type": "TELEMETRY", "timestamp": 1778313685.5442355, "trade_id": "SUIUSDT_1778310175", "symbol": "SUIUSDT", "unrealized_pnl": 0.028, "entry_price_real": 1.0698, "status": "OPEN"}
