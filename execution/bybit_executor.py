@@ -208,7 +208,7 @@ class BybitExecutor:
             if not response or response.get("retCode") != 0:
                 return []
                 
-            return response.get("result", {}).get("list", [])
+            return response if response else {}
         except Exception as e:
             print(f"❌ [OPEN_ORDERS_FAIL] {e}")
             return []

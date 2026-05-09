@@ -65,14 +65,17 @@ margin_ratio = 0
 if equity_live > 0:
     margin_ratio = total_exposure / equity_live
 
-# ✅ DESYNC LOGIC
+# ✅ DESYNC LOGIC (FIXED)
 real_open_positions = len([
     p for p in live_positions
     if abs(float(p.get("size", 0))) > 0 or abs(float(p.get("unrealisedPnl", 0))) > 0
 ])
+
+# FIX: Strict filtering to avoid counting PENDING or STALE entries
 json_open_positions = len([
     t for t in active_trades_json
-    if t.get("status") in ["OPEN", "ACTIVE"]
+    if t.get("status") == "OPEN"
+    and t.get("is_active") is True
 ])
 
 # 6. MAIN UI DISPLAY
@@ -211,8 +214,12 @@ with tab4:
         # Stats
         pair_stats = compute_pair_stats(closed_trades)
         c1, c2 = st.columns(2)
-        with c1: st.bar_chart({p: pair_stats[p]["winrate"] for p in pair_stats})
-        with c2: st.bar_chart({p: pair_stats[p]["avg_pnl"] for p in pair_stats})
+        with c1: 
+            st.write("**Winrate by Pair**")
+            st.bar_chart({p: pair_stats[p]["winrate"] for p in pair_stats})
+        with c2: 
+            st.write("**Avg PnL by Pair**")
+            st.bar_chart({p: pair_stats[p]["avg_pnl"] for p in pair_stats})
 
 # 9. SYSTEM DEBUGGER
 with st.expander("🛠 Developer System State"):

@@ -1,10 +1,11 @@
 import os
 import time
 
+# STEP 1: Updated Imports
 from storage.trade_logger import (
     save_active_trades,
     load_active_trades,
-    append_closed_trade
+    append_closed_trade  # Added for archiving
 )
 
 from storage.excel_logger import append_trade_to_excel
@@ -18,7 +19,7 @@ from core.setup_memory.outcome_updater import (
     register_close_event
 )
 
-# NEW: MFE/MAE Tracker Imports (Step 2)
+# MFE/MAE Tracker Imports
 from core.setup_memory.mfe_mae_tracker import (
     initialize_tracking,
     update_tracking,
@@ -138,16 +139,14 @@ def resolve_trades(get_candle_func):
                 order = executor.place_market_order(symbol=symbol, side=side, qty=qty)
                 if order and order.get("retCode") == 0:
                     trade["order_id"] = order["result"]["orderId"]
-                    trade["status"] = "OPEN"
+                    trade["status"] = "ACTIVE"  # Changed to ACTIVE per instructions
                     trade["is_active"] = True
                     trade["qty"] = qty
                     trade["filled_price"] = float(candle["close"])
                     trade["executed_at"] = time.time() 
 
-                    # TRACKING: Initialize (Step 3)
                     initialize_tracking(trade)
 
-                    # SL/TP Setup
                     risk_dist = abs(trade["entry"] - trade["sl"])
                     if trade["bias"] == "BULLISH":
                         sl, tp = trade["filled_price"] - risk_dist, trade["filled_price"] + (risk_dist * trade["rr_ratio"])
@@ -157,6 +156,10 @@ def resolve_trades(get_candle_func):
                     executor.set_trading_stop(symbol=symbol, stop_loss=round(sl, 6), take_profit=round(tp, 6))
                     
                     register_execution_event(trade)
+                    
+                    # Persist updated active state immediately
+                    save_active_trades(active_list)
+                    
                     print(f"✅ EXECUTED {symbol}")
                     live_open_count += 1
                     changes_made = True
@@ -173,46 +176,71 @@ def resolve_trades(get_candle_func):
 
                 if positions and positions.get("retCode") == 0:
                     for pos in positions["result"]["list"]:
-                        if float(pos.get("size", 0)) > 0:
+                        if pos.get("symbol") != symbol:
+                            continue
+
+                        size = abs(float(pos.get("size", 0)))
+                        if size > 0:
                             exchange_found = True
                             trade["unrealized_pnl"] = float(pos.get("unrealisedPnl", 0))
                             trade["entry_price_real"] = float(pos.get("avgPrice", 0))
                             
-                            # TRACKING: Update (Step 4)
                             update_tracking(trade)
                             register_telemetry_event(trade)
                             break
 
+                # ---------------------------------------------------------
+                # STEP 2: PATCH THE MISSING POSITION LOGIC (GHOST FIX)
+                # ---------------------------------------------------------
                 if not exchange_found:
-                    # Grace period and strike system
+                    # Grace period (20s) to allow exchange to process order
                     if (time.time() - trade.get("executed_at", 0)) < 20:
                         new_active.append(trade)
                         continue
 
                     trade["missing_counter"] = trade.get("missing_counter", 0) + 1
+                    
+                    # Still missing but waiting for confirmation strikes
                     if trade["missing_counter"] < 3:
                         new_active.append(trade)
                         continue
-
-                    # Finalize Closure
-                    latest_candle = get_candle_func(symbol)
-                    exit_price = float(latest_candle["close"]) if latest_candle else trade.get("entry_price_real", trade["entry"])
                     
-                    # TRACKING: Finalize (Step 5)
-                    finalize_tracking(trade)
-                    
-                    closed_trade = close_trade(trade, exit_price, "EXCHANGE_EXIT")
-                    register_close_event(closed_trade)
-                    append_closed_trade(closed_trade)
-                    append_trade_to_excel(closed_trade)
-                    changes_made = True
-                    continue
+                    # FINAL STRIKE: Position is definitely closed
+                    else:
+                        print(f"✅ POSITION CLOSED DETECTED: {symbol}")
+                        
+                        # 1. Fetch final price for record keeping
+                        latest_candle = get_candle_func(symbol)
+                        exit_price = float(latest_candle["close"]) if latest_candle else trade.get("entry_price_real", trade["entry"])
+                        
+                        # 2. Finalize MFE/MAE and Telemetry
+                        finalize_tracking(trade)
+                        
+                        # 3. Build closed trade object
+                        # We determine WIN/LOSS based on PnL captured in Step 4 sync
+                        pnl = float(trade.get("unrealized_pnl", 0))
+                        result_label = "WIN" if pnl > 0 else ("LOSS" if pnl < 0 else "BREAKEVEN")
+                        
+                        closed_trade = close_trade(trade, exit_price, result_label)
+                        
+                        # 4. Persistence and Cleanup
+                        register_close_event(closed_trade)
+                        append_closed_trade(closed_trade)
+                        append_trade_to_excel(closed_trade)
+                        
+                        changes_made = True
+                        print(f"📦 Archived closed trade: {symbol} | {result_label} | PnL: {pnl}")
+                        
+                        # CRITICAL: We do NOT do new_active.append(trade) here.
+                        # This removes it from the JSON on the next save.
+                        continue 
                 else:
                     trade["missing_counter"] = 0 
 
             except Exception as e:
                 print(f"❌ POSITION SYNC FAIL {symbol}: {e}")
 
+        # Add the trade back to the list if it survived the filters above
         new_active.append(trade)
 
     if changes_made:
