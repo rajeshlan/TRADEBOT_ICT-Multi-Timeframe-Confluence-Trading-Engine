@@ -72,7 +72,7 @@ real_open_positions = len([
 ])
 json_open_positions = len([
     t for t in active_trades_json
-    if t.get("status") in ["PENDING", "OPEN", "ACTIVE"]
+    if t.get("status") in ["OPEN", "ACTIVE"]
 ])
 
 # 6. MAIN UI DISPLAY

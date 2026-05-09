@@ -108,7 +108,7 @@ def run_cycle():
 
             current_balance = executor.get_balance()
             log_trade(decision, current_balance)
-            active_count += 1 # Increment to prevent duplicate entries in same cycle
+            
             
             print(f"📡 SIGNAL LOGGED: {symbol}")
 
