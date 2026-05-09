@@ -1,4 +1,6 @@
 import time
+# STEP 1: ADD IMPORT (Feature Engine Integration)
+from core.setup_memory.feature_engine import build_features
 
 class SignalManager:
     """
@@ -18,9 +20,16 @@ class SignalManager:
     def process(self, symbol, results_by_tf):
         """
         🚀 PHASE 6.3 — DISCIPLINE ENGINE (Risk Filter Edition)
-        Filters raw technical data into actionable trading signals.
+        Filters raw technical data into actionable trading signals with feature enrichment.
         """
         now = time.time()
+
+        # STEP 2: BUILD CANDLE REGISTRY
+        # This captures the raw market context needed for ATR and Regime analysis
+        candles_by_tf = {}
+        for tf, result in results_by_tf.items():
+            if result and result.get("candles"):
+                candles_by_tf[tf] = result["candles"]
 
         # 2️⃣ STEP 1: COOLDOWN FILTER
         last_symbol_time = self.last_signal_time.get(symbol)
@@ -133,33 +142,52 @@ class SignalManager:
                 print(f"[REJECTED] {symbol} Risk too wide: {risk_pct:.2f}%")
                 return None
 
-            # 🛠️ FIX: CORRECT TP/SL CALCULATION
-            # Calculate the absolute distance of the risk
+            # 🛠️ TP/SL CALCULATION
             risk_amount = abs(entry - sl)
             rr_ratio = 2.0  # Standard 1:2 Reward to Risk
 
             if bias == "BULLISH":
-                # For Longs: TP is above entry
                 tp = entry + (risk_amount * rr_ratio)
             else:
-                # For Shorts: TP is below entry
                 tp = entry - (risk_amount * rr_ratio)
+
+            # ---------------------------------------------------------
+            # 🚀 PHASE 6.3.1: ENRICH SIGNAL BEFORE RETURN
+            # ---------------------------------------------------------
+            signal = {
+                "symbol": symbol,
+                "bias": bias,
+                "timeframes": valid_timeframes,
+                "confluence_score": min(score, 100),
+
+                "entry": round(entry, 4),
+                "sl": round(sl, 4),
+                "tp": round(tp, 4),
+
+                "rr": f"1:{rr_ratio}",
+                "risk_pct_distance": round(risk_pct, 2),
+
+                "details": f"Refined ICT Discipline Engine ({best_tf} Source)"
+            }
+
+            # 🚀 FEATURE ENRICHMENT LAYER
+            try:
+                enriched = build_features(
+                    signal=signal,
+                    results_by_tf=results_by_tf,
+                    candles_by_tf=candles_by_tf
+                )
+
+                if enriched and isinstance(enriched, dict):
+                    signal.update(enriched)
+
+            except Exception as e:
+                print(f"[FEATURE_ENGINE_ERROR] {symbol}: {e}")
 
             # Finalize tracking
             self.last_signals[key] = now
             self.last_signal_time[symbol] = now
 
-            return {
-                "symbol": symbol,
-                "bias": bias,
-                "timeframes": valid_timeframes,
-                "confluence_score": min(score, 100),
-                "entry": round(entry, 4),
-                "sl": round(sl, 4),
-                "tp": round(tp, 4),
-                "rr": f"1:{rr_ratio}",
-                "risk_pct_distance": round(risk_pct, 2),
-                "details": f"Refined ICT Discipline Engine ({best_tf} Source)"
-            }
+            return signal
 
         return None
