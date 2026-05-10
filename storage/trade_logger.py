@@ -2,6 +2,10 @@ import json
 import time
 from pathlib import Path
 
+# ✅ IMPORT SCHEMA NORMALIZER
+# Ensures consistency across signal generation, execution, and recovery
+from core.trade_schema import normalize_trade_schema
+
 # --- 1. FILE PATHS ---
 # Master ledger for backup and full history
 FILE = Path("storage/trades.json")
@@ -53,6 +57,8 @@ def save_trades(trades):
     """Writes the full trade list to the master ledger."""
     FILE.parent.mkdir(parents=True, exist_ok=True)
     try:
+        # ✅ STEP 3 — NORMALIZE BEFORE SAVE
+        trades = [normalize_trade_schema(t) for t in trades]
         FILE.write_text(json.dumps(trades, indent=2), encoding="utf-8")
     except Exception as e:
         print(f"[ERROR] trade_logger: Could not save master ledger: {e}")
@@ -65,6 +71,8 @@ def save_active_trades(trades):
     """
     ACTIVE_FILE.parent.mkdir(parents=True, exist_ok=True)
     try:
+        # ✅ STEP 3 — NORMALIZE BEFORE SAVE
+        trades = [normalize_trade_schema(t) for t in trades]
         with open(ACTIVE_FILE, "w") as f:
             json.dump(trades, f, indent=2)
     except Exception as e:
@@ -79,8 +87,8 @@ def log_trade(signal, current_balance):
     denominator = abs(signal["entry"] - signal["sl"])
     rr_calc = abs((signal["tp"] - signal["entry"]) / denominator) if denominator != 0 else 0
 
-    # 1. Prepare Enhanced Trade Object
-    trade = {
+    # ✅ STEP 2 — PATCH TRADE DICT (Normalize on creation)
+    trade = normalize_trade_schema({
         "id": f"{signal['symbol']}_{int(time.time())}",
         "symbol": signal["symbol"],
         "bias": signal["bias"],
@@ -112,10 +120,9 @@ def log_trade(signal, current_balance):
         # ✅ SNAPSHOTS
         "balance_snapshot": current_balance,
         "candles_seen": 0
-    }
+    })
 
     # ✅ PHASE 1A — SETUP MEMORY SNAPSHOT
-    # This is called before the trade is persisted or modified by the executor.
     try:
         from core.setup_memory import register_signal_setup
         register_signal_setup(trade)
@@ -141,18 +148,14 @@ def append_closed_trade(trade):
     """
     CLOSED_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-    if not CLOSED_FILE.exists():
-        CLOSED_FILE.write_text("[]")
+    # ✅ STEP 3 — NORMALIZE BEFORE SAVE
+    trade = normalize_trade_schema(trade)
 
-    try:
-        # Use _safe_load logic or similar robust reading here
-        with open(CLOSED_FILE, "r") as f:
-            content = f.read().strip()
-            closed = json.loads(content) if content else []
-    except (json.JSONDecodeError, IOError):
-        closed = []
-
+    closed = _safe_load(CLOSED_FILE)
     closed.append(trade)
+    
+    # Ensure the entire list is normalized before saving history
+    closed = [normalize_trade_schema(t) for t in closed]
 
     try:
         with open(CLOSED_FILE, "w") as f:

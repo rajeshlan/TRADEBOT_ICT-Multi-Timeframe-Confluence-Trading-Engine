@@ -1,6 +1,8 @@
 import time
 # STEP 1: ADD IMPORT (Feature Engine Integration)
 from core.setup_memory.feature_engine import build_features
+# ✅ STEP 6: IMPORT SCHEMA NORMALIZER
+from core.trade_schema import normalize_trade_schema
 
 class SignalManager:
     """
@@ -154,7 +156,8 @@ class SignalManager:
             # ---------------------------------------------------------
             # 🚀 PHASE 6.3.1: ENRICH SIGNAL BEFORE RETURN
             # ---------------------------------------------------------
-            signal = {
+            # ✅ STEP 6: WRAP SIGNAL WITH NORMALIZER
+            signal = normalize_trade_schema({
                 "symbol": symbol,
                 "bias": bias,
                 "timeframes": valid_timeframes,
@@ -168,7 +171,7 @@ class SignalManager:
                 "risk_pct_distance": round(risk_pct, 2),
 
                 "details": f"Refined ICT Discipline Engine ({best_tf} Source)"
-            }
+            })
 
             # 🚀 FEATURE ENRICHMENT LAYER
             try:

@@ -65,13 +65,12 @@ margin_ratio = 0
 if equity_live > 0:
     margin_ratio = total_exposure / equity_live
 
-# ✅ DESYNC LOGIC (FIXED)
+# ✅ DESYNC LOGIC
 real_open_positions = len([
     p for p in live_positions
     if abs(float(p.get("size", 0))) > 0 or abs(float(p.get("unrealisedPnl", 0))) > 0
 ])
 
-# FIX: Strict filtering to avoid counting PENDING or STALE entries
 json_open_positions = len([
     t for t in active_trades_json
     if t.get("status") == "OPEN"
@@ -82,13 +81,11 @@ json_open_positions = len([
 st.title("📊 TRADEBOT PERFORMANCE DASHBOARD")
 
 # --- WARNINGS SECTION ---
-# A. Desync Warning
 if json_open_positions != real_open_positions:
     st.warning(
         f"⚠️ STATE DESYNC | Local JSON: {json_open_positions} | Exchange Actual: {real_open_positions}"
     )
 
-# B. Margin Exposure Warning
 if margin_ratio >= 4:
     st.error(f"🚨 HIGH RISK EXPOSURE | Margin Ratio: {round(margin_ratio, 2)}x")
 elif margin_ratio >= 2:
@@ -156,7 +153,6 @@ with tab1:
                 })
             except: continue
         
-        # ✅ STYLED DATAFRAME
         df_exposure = pd.DataFrame(exposure_rows)
 
         def color_side(val):
@@ -181,12 +177,15 @@ with tab2:
     else:
         order_rows = []
         for o in open_orders:
+            if not isinstance(o, dict):
+                continue
+
             order_rows.append({
                 "Symbol": o.get("symbol"),
                 "Side": o.get("side"),
                 "Type": o.get("orderType"),
                 "Qty": o.get("qty"),
-                "Price": o.get("price") if float(o.get("price", 0)) > 0 else "Market",
+                "Price": o.get("price") if float(o.get("price", 0) or 0) > 0 else "Market",
                 "Trigger": o.get("triggerPrice") or "N/A",
                 "Status": o.get("orderStatus")
             })
@@ -196,14 +195,32 @@ with tab3:
     st.subheader(f"Trade History ({len(closed_trades)})")
     if closed_trades:
         df_hist = pd.DataFrame(closed_trades).sort_values("closed_at", ascending=False)
-        st.dataframe(df_hist[["symbol", "bias", "entry", "exit_price", "pnl", "result"]], use_container_width=True, hide_index=True)
+        
+        # --- FIX: SAFE COLUMN FILTERING ---
+        required_cols = [
+            "symbol",
+            "bias",
+            "entry",
+            "exit_price",
+            "pnl",
+            "result"
+        ]
+
+        # Intersect required with available to prevent KeyErrors
+        available_cols = [c for c in required_cols if c in df_hist.columns]
+
+        st.dataframe(
+            df_hist[available_cols],
+            use_container_width=True,
+            hide_index=True
+        )
+        # ----------------------------------
     else:
         st.info("No history available.")
 
 with tab4:
     st.subheader("📈 Performance Analytics")
     if closed_trades:
-        # Simple Equity Chart
         curve = []
         bal = current_balance - closed_pnl
         for t in closed_trades:
@@ -211,7 +228,6 @@ with tab4:
             curve.append(bal)
         st.line_chart(pd.DataFrame({"Equity": curve}))
         
-        # Stats
         pair_stats = compute_pair_stats(closed_trades)
         c1, c2 = st.columns(2)
         with c1: 

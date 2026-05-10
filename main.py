@@ -43,33 +43,54 @@ pairs = config["pairs"]
 def run_cycle():
     print(f"\n⏱ Cycle started at {time.strftime('%H:%M:%S')}...")
 
-    # --- PHASE A: RESOLUTION & EXECUTION ---
+    # --- PHASE A: RESOLUTION & EXCHANGE SYNC ---
+    # This reconciles local JSON with the exchange before we start the scan
     print("⚖️ Running Trade Resolver & Exchange Sync...")
     resolve_trades(get_current_candle)
 
-    # --- PHASE B: SCANNING ---
-    # ✅ FIX 3: Single Source of Truth for Position Counting
+    # --- PHASE B: AUTHORITATIVE STATE RECONCILIATION ---
     try:
+        # 1. Fetch REAL LIVE EXCHANGE POSITIONS
         real_open_positions = executor.get_all_positions()
-        active_count = len(real_open_positions)
-        print(f"📡 EXCHANGE CHECK: {active_count} active positions found.")
+        exchange_active_count = len(real_open_positions)
+
+        # 2. Fetch LOCAL RESERVED SLOTS
+        # We count everything that is currently "using" a slot in our strategy
+        active_list = load_active_trades() or []
+        reserved_slots = len([
+            t for t in active_list
+            if t.get("status") in ["PENDING", "EXECUTING", "OPEN", "ACTIVE"]
+        ])
+
+        print(
+            f"📡 EXCHANGE CHECK: {exchange_active_count} live | "
+            f"🧠 RESERVED SLOTS: {reserved_slots}"
+        )
+
     except Exception as e:
         print(f"⚠️ [EXCHANGE_ERROR] Falling back to local state: {e}")
         active_list = load_active_trades() or []
-        active_count = len([t for t in active_list if t.get("is_active")])
+        reserved_slots = len([
+            t for t in active_list
+            if t.get("status") in ["PENDING", "EXECUTING", "OPEN", "ACTIVE"]
+        ])
 
+    # --- PHASE C: SCANNING ---
     for pair in pairs:
         symbol = pair["symbol"]
         timeframes = pair["timeframes"]
         results = {}
 
-        # 1. Global Portfolio Limit Check
-        if active_count >= MAX_OPEN_TRADES:
-            print(f"🛑 [LIMIT] Max trades reached ({active_count}/{MAX_OPEN_TRADES}). Skipping scan.")
+        # 1. Global Portfolio Limit Check (Using Reserved Slots)
+        if reserved_slots >= MAX_OPEN_TRADES:
+            print(
+                f"🛑 [LIMIT] Max reserved slots reached "
+                f"({reserved_slots}/{MAX_OPEN_TRADES}). Skipping scan."
+            )
             break
 
         # 2. Check Symbol-Specific State
-        active_list = load_active_trades() or []
+        # Ensure we don't scan a pair we are already trying to trade
         existing_trade = next(
             (t for t in active_list if t.get("symbol") == symbol and t.get("status") in ["PENDING", "EXECUTING", "OPEN", "ACTIVE"]),
             None
@@ -97,11 +118,12 @@ def run_cycle():
 
             # 4. Risk Management
             stats = get_stats()
+            # Default to 2% risk if no stats available
             kelly_val = kelly_fraction(stats["winrate"], stats["rr"]) if stats else 0.02
             risk = min(kelly_val * 100, MAX_RISK_PER_TRADE)
             decision["risk_pct"] = round(risk, 2)
 
-            # --- PHASE C: SIGNAL NOTIFICATION & LOGGING ---
+            # --- PHASE D: SIGNAL NOTIFICATION & LOGGING ---
             msg = format_signal(decision)
             print(f"🔥 HIGH QUALITY SIGNAL: {symbol}")
             alerter.send(msg)
@@ -109,7 +131,9 @@ def run_cycle():
             current_balance = executor.get_balance()
             log_trade(decision, current_balance)
             
-            
+            # Increment reserved_slots locally so the next pair in this loop 
+            # respects the trade we just logged.
+            reserved_slots += 1
             print(f"📡 SIGNAL LOGGED: {symbol}")
 
     print(f"💤 Scan complete. Resting...")
