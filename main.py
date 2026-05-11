@@ -44,35 +44,47 @@ def run_cycle():
     print(f"\n⏱ Cycle started at {time.strftime('%H:%M:%S')}...")
 
     # --- PHASE A: RESOLUTION & EXCHANGE SYNC ---
-    # This reconciles local JSON with the exchange before we start the scan
+    # Reconciles local JSON with the exchange fingerprinting logic
     print("⚖️ Running Trade Resolver & Exchange Sync...")
     resolve_trades(get_current_candle)
 
     # --- PHASE B: AUTHORITATIVE STATE RECONCILIATION ---
     try:
-        # 1. Fetch REAL LIVE EXCHANGE POSITIONS
+        # 1. Fetch REAL LIVE EXCHANGE POSITIONS (The Ground Truth)
         real_open_positions = executor.get_all_positions()
         exchange_active_count = len(real_open_positions)
 
-        # 2. Fetch LOCAL RESERVED SLOTS
-        # We count everything that is currently "using" a slot in our strategy
+        # 2. Fetch LOCAL RESERVED INTENTS
+        # We only count what the exchange doesn't know about yet
         active_list = load_active_trades() or []
-        reserved_slots = len([
+        
+        # ✅ UPDATED: Only count "fresh" pending trades (less than 120s old)
+        # This prevents "phantom" trades from permanently blocking slots.
+        pending_reservations = [
             t for t in active_list
-            if t.get("status") in ["PENDING", "EXECUTING", "OPEN", "ACTIVE"]
-        ])
+            if (
+                t.get("status") in ["PENDING", "EXECUTING"]
+                and (time.time() - t.get("created_at", 0)) < 120
+            )
+        ]
+
+        # ✅ HYBRID CALCULATION: Exchange (Active) + Local (Fresh Pending)
+        reserved_slots = exchange_active_count + len(pending_reservations)
 
         print(
             f"📡 EXCHANGE CHECK: {exchange_active_count} live | "
-            f"🧠 RESERVED SLOTS: {reserved_slots}"
+            f"🧠 FRESH PENDING: {len(pending_reservations)} | "
+            f"📦 TOTAL RESERVED: {reserved_slots}"
         )
 
     except Exception as e:
         print(f"⚠️ [EXCHANGE_ERROR] Falling back to local state: {e}")
         active_list = load_active_trades() or []
+        # Fallback logic also applies the 120s rule for pending items
         reserved_slots = len([
             t for t in active_list
-            if t.get("status") in ["PENDING", "EXECUTING", "OPEN", "ACTIVE"]
+            if t.get("status") in ["OPEN", "ACTIVE"] or 
+            (t.get("status") in ["PENDING", "EXECUTING"] and (time.time() - t.get("created_at", 0)) < 120)
         ])
 
     # --- PHASE C: SCANNING ---
@@ -81,7 +93,7 @@ def run_cycle():
         timeframes = pair["timeframes"]
         results = {}
 
-        # 1. Global Portfolio Limit Check (Using Reserved Slots)
+        # 1. Global Portfolio Limit Check
         if reserved_slots >= MAX_OPEN_TRADES:
             print(
                 f"🛑 [LIMIT] Max reserved slots reached "
@@ -90,7 +102,6 @@ def run_cycle():
             break
 
         # 2. Check Symbol-Specific State
-        # Ensure we don't scan a pair we are already trying to trade
         existing_trade = next(
             (t for t in active_list if t.get("symbol") == symbol and t.get("status") in ["PENDING", "EXECUTING", "OPEN", "ACTIVE"]),
             None
@@ -116,9 +127,9 @@ def run_cycle():
                 print(f"❌ [REJECTED] {symbol} (Score: {score}) or Duplicate.")
                 continue
 
-            # 4. Risk Management
+            # 4. Risk Management (Kelly Criterion)
             stats = get_stats()
-            # Default to 2% risk if no stats available
+            # Default to 2% if stats are missing
             kelly_val = kelly_fraction(stats["winrate"], stats["rr"]) if stats else 0.02
             risk = min(kelly_val * 100, MAX_RISK_PER_TRADE)
             decision["risk_pct"] = round(risk, 2)
@@ -129,10 +140,11 @@ def run_cycle():
             alerter.send(msg)
 
             current_balance = executor.get_balance()
+            # Ensure decision object includes a 'created_at' timestamp for future loops
+            decision["created_at"] = time.time()
             log_trade(decision, current_balance)
             
-            # Increment reserved_slots locally so the next pair in this loop 
-            # respects the trade we just logged.
+            # 🚀 TEMPORARY INCREMENT
             reserved_slots += 1
             print(f"📡 SIGNAL LOGGED: {symbol}")
 

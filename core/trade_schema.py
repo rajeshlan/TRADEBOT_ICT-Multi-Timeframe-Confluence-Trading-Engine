@@ -17,6 +17,14 @@ BASE_TRADE_SCHEMA = {
     "symbol": None,
     "bias": None,
     "status": "PENDING",
+    "is_active": False,
+
+    # ✅ EXECUTION STATE MACHINE (RETRY METADATA)
+    "execution_state": "PENDING",          # Current step in the execution lifecycle
+    "execution_attempts": 0,               # Counter for retry logic
+    "last_execution_error": None,          # String storage for the last API failure
+    "last_execution_attempt_at": None,     # Unix timestamp of the last attempt
+    "retry_after": None,                   # Backoff timestamp for the next valid attempt
 
     # Pricing
     "entry": None,
@@ -28,6 +36,20 @@ BASE_TRADE_SCHEMA = {
     "sl": None,
     "tp": None,
     "rr_ratio": 0.0,
+    
+    # Order Tracking (Order Sync Patch)
+    "tp_order_exists": False,
+    "sl_order_exists": False,
+    "tp_order_id": None,
+    "sl_order_id": None,
+    "tp_trigger_price": None,
+    "sl_trigger_price": None,
+    "exchange_orders_synced": False,
+    
+    # ✅ PROTECTION INTEGRITY (Persistent Fields)
+    "protection_broken": False,
+    "missing_protection": [],
+    "protection_status": "UNKNOWN",
 
     # Size
     "qty": 0.0,
@@ -66,50 +88,26 @@ def normalize_trade_schema(trade: dict) -> dict:
     if trade:
         normalized.update(trade)
 
-    # ✅ DETERMINISTIC ID GENERATION
-    # ONLY generate UUID for brand new trades.
+    # ✅ UUID GENERATION
+    # Use standard UUID4 for guaranteed uniqueness
     if not normalized.get("trade_uuid"):
-        symbol = normalized.get("symbol", "UNKNOWN")
-        side = normalized.get("bias", "UNKNOWN")
-        
-        # Capture current unix timestamp for the ID suffix
-        created_ts = int(time.time())
+        normalized["trade_uuid"] = str(uuid.uuid4())
 
-        normalized["trade_uuid"] = (
-            f"TRD_{symbol}_{side}_{created_ts}"
-        )
-
-    # ✅ EXCHANGE FINGERPRINTING
-    # Build deterministic exchange fingerprint if missing
+    # ✅ IMPROVED FINGERPRINTING
+    # Build deterministic exchange fingerprint using Symbol, Bias, and Qty
     if not normalized.get("exchange_fingerprint"):
         symbol = normalized.get("symbol", "UNKNOWN")
         side = normalized.get("bias", "UNKNOWN")
         
-        # Ensure entry is treated as a float for consistent rounding
         try:
-            entry_val = float(normalized.get("entry") or 0)
+            qty_val = float(normalized.get("qty") or 0)
         except (ValueError, TypeError):
-            entry_val = 0.0
+            qty_val = 0.0
             
-        entry_str = round(entry_val, 4)
+        qty_str = round(qty_val, 4)
 
         normalized["exchange_fingerprint"] = (
-            f"{symbol}_{side}_{entry_str}"
+            f"{symbol}_{side}_{qty_str}"
         )
-
-    # ✅ LIFECYCLE TIMESTAMPS
-    now_iso = datetime.utcnow().isoformat()
-    now_ts = int(time.time())
-
-    # ISO strings for logs/human readability
-    if not normalized["created_at"]:
-        normalized["created_at"] = now_iso
-    normalized["updated_at"] = now_iso
-
-    # Unix timestamps for logic and syncing
-    if not normalized.get("first_seen_at"):
-        normalized["first_seen_at"] = now_ts
-    
-    normalized["last_synced_at"] = now_ts
 
     return normalized

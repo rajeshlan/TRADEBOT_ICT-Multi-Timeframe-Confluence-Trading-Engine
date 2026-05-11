@@ -3,13 +3,10 @@ import time
 from pathlib import Path
 
 # ✅ IMPORT SCHEMA NORMALIZER
-# Ensures consistency across signal generation, execution, and recovery
 from core.trade_schema import normalize_trade_schema
 
 # --- 1. FILE PATHS ---
-# Master ledger for backup and full history
 FILE = Path("storage/trades.json")
-# Optimized files for high-speed engine access
 ACTIVE_FILE = Path("storage/active_trades.json")
 CLOSED_FILE = Path("storage/closed_trades.json")
 
@@ -19,7 +16,6 @@ def _safe_load(file: Path):
     """
     🛡️ TRANSACTIONAL LOADER
     Handles partial writes and race conditions with a 3-stage retry mechanism.
-    Essential for Streamlit + Bot concurrent access.
     """
     if not file.exists():
         return []
@@ -31,134 +27,145 @@ def _safe_load(file: Path):
                 return []
             return json.loads(content)
         except (json.JSONDecodeError, IOError, PermissionError):
-            # Wait briefly for the other process to release the file
             time.sleep(0.05)
 
     print(f"[WARNING] trade_logger: Failed to read {file.name} after 3 attempts.")
     return []
 
+def _atomic_write_json(file: Path, data):
+    """
+    🚀 ATOMIC JSON PERSISTENCE
+    Prevents partial writes and corruption by using a temp-file swap.
+    """
+    tmp_file = file.with_suffix(".tmp")
+
+    try:
+        # Ensure directory exists
+        file.parent.mkdir(parents=True, exist_ok=True)
+        
+        with open(tmp_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        
+        # Atomic rename/replace
+        tmp_file.replace(file)
+    except Exception as e:
+        if tmp_file.exists():
+            tmp_file.unlink()  # Clean up temp file on failure
+        raise e
+
 # --- 3. PUBLIC LOADERS ---
 
 def load_active_trades():
-    """Returns only trades currently in the market (pending or active)."""
     return _safe_load(ACTIVE_FILE)
 
 def load_closed_trades():
-    """Returns the historical record of completed trades."""
     return _safe_load(CLOSED_FILE)
 
 def load_trades():
-    """Returns the master ledger (all statuses)."""
     return _safe_load(FILE)
 
 # --- 4. PERSISTENCE LOGIC ---
 
 def save_trades(trades):
-    """Writes the full trade list to the master ledger."""
-    FILE.parent.mkdir(parents=True, exist_ok=True)
+    """Writes the full trade list to the master ledger atomically."""
     try:
-        # ✅ STEP 3 — NORMALIZE BEFORE SAVE
-        trades = [normalize_trade_schema(t) for t in trades]
-        FILE.write_text(json.dumps(trades, indent=2), encoding="utf-8")
+        # Normalize all trades before saving
+        normalized_trades = [normalize_trade_schema(t) for t in trades]
+        _atomic_write_json(FILE, normalized_trades)
     except Exception as e:
         print(f"[ERROR] trade_logger: Could not save master ledger: {e}")
 
 def save_active_trades(trades):
     """
-    🚀 HIGH-SPEED SYNC
-    Overwrites the active trades file. Used for updating unrealized PnL or 
-    moving a trade from PENDING to ACTIVE.
+    🚀 ATOMIC ACTIVE TRADE PERSISTENCE
+    Includes UUID deduplication to ensure state integrity.
     """
-    ACTIVE_FILE.parent.mkdir(parents=True, exist_ok=True)
     try:
-        # ✅ STEP 3 — NORMALIZE BEFORE SAVE
+        # Normalize safely
         trades = [normalize_trade_schema(t) for t in trades]
-        with open(ACTIVE_FILE, "w") as f:
-            json.dump(trades, f, indent=2)
+
+        # ✅ UUID Deduplication Layer
+        deduped = {}
+
+        for trade in trades:
+            trade_uuid = trade.get("trade_uuid")
+            if not trade_uuid:
+                continue
+
+            existing = deduped.get(trade_uuid)
+
+            # If it's a new UUID, add it. 
+            # If it exists, keep the one with the most recent 'last_synced_at'
+            if not existing:
+                deduped[trade_uuid] = trade
+                continue
+
+            existing_sync = existing.get("last_synced_at", 0) or 0
+            new_sync = trade.get("last_synced_at", 0) or 0
+
+            if new_sync >= existing_sync:
+                deduped[trade_uuid] = trade
+
+        final_trades = list(deduped.values())
+        _atomic_write_json(ACTIVE_FILE, final_trades)
+
     except Exception as e:
         print(f"[ERROR] trade_logger: Could not save active trades: {e}")
 
 def log_trade(signal, current_balance):
     """
     🚀 STATE-AWARE LOGGER
-    Initializes the trade in a PENDING state. This is the 'Signal' phase.
+    Initializes a new trade in PENDING state and persists it.
     """
-    # 📐 Calculate Risk/Reward Ratio dynamically
     denominator = abs(signal["entry"] - signal["sl"])
     rr_calc = abs((signal["tp"] - signal["entry"]) / denominator) if denominator != 0 else 0
 
-    # ✅ STEP 2 — PATCH TRADE DICT (Normalize on creation)
     trade = normalize_trade_schema({
-        "id": f"{signal['symbol']}_{int(time.time())}",
         "symbol": signal["symbol"],
         "bias": signal["bias"],
         "entry": signal["entry"],
         "sl": signal["sl"],
         "tp": signal["tp"],
-
-        # ✅ METRICS & CONFIG
         "rr_ratio": round(rr_calc, 2),
-        "risk_pct": min(signal.get("risk", 2), 3), # Cap risk at 3%
-        "execution_type": signal.get("mode", "LIVE"),
-        
-        # 🔥 BOT OWNERSHIP TAG: Distinguishes auto-trades from manual ones
-        "bot_managed": True,
-
-        # ✅ STATE TRACKING
-        "status": "PENDING",           # PENDING = Signal created, waiting for Bybit Order
-        "is_active": False,            # False = Not yet filled on exchange
-        "order_id": None,              # Populated by BybitExecutor
-        "filled_price": None,          
-        "activated_at": None,          
+        "status": "PENDING",
+        "is_active": False,
         "created_at": time.time(),
-        "closed_at": None,
-        "result": None,
-        "pnl": 0.0,
-        "unrealized_pnl": 0.0,
-        "unrealized_pct": 0.0,
-
-        # ✅ SNAPSHOTS
         "balance_snapshot": current_balance,
-        "candles_seen": 0
+        "bot_managed": True
     })
 
-    # ✅ PHASE 1A — SETUP MEMORY SNAPSHOT
+    # Setup Memory Snapshot
     try:
         from core.setup_memory import register_signal_setup
         register_signal_setup(trade)
     except Exception as e:
         print(f"[SETUP_MEMORY_ERROR] {e}")
 
-    # 2. Update Master Ledger (Atomic Write)
+    # Update Master Ledger
     all_trades = load_trades()
     all_trades.append(trade)
     save_trades(all_trades)
 
-    # 3. Update Active Trades File (High-Speed Access for Resolver)
+    # Update Active Trades
     active = load_active_trades()
     active.append(trade)
     save_active_trades(active)
     
-    print(f"📡 [LOGGER] Trade Initialized (PENDING): {trade['id']} | RR: {trade['rr_ratio']}")
+    print(f"📡 [LOGGER] Trade Initialized: {trade['trade_uuid']} | Symbol: {trade['symbol']}")
     return trade
 
 def append_closed_trade(trade):
-    """
-    ✅ Modularly appends a completed trade to history for long-term tracking.
-    """
-    CLOSED_FILE.parent.mkdir(parents=True, exist_ok=True)
-
-    # ✅ STEP 3 — NORMALIZE BEFORE SAVE
+    """Appends a completed trade to history atomically."""
+    # Ensure current trade is normalized
     trade = normalize_trade_schema(trade)
 
     closed = _safe_load(CLOSED_FILE)
     closed.append(trade)
     
-    # Ensure the entire list is normalized before saving history
-    closed = [normalize_trade_schema(t) for t in closed]
+    # Ensure the entire history list is normalized
+    final_list = [normalize_trade_schema(t) for t in closed]
 
     try:
-        with open(CLOSED_FILE, "w") as f:
-            json.dump(closed, f, indent=2)
+        _atomic_write_json(CLOSED_FILE, final_list)
     except Exception as e:
         print(f"[ERROR] trade_logger: Failed to append closed trade: {e}")

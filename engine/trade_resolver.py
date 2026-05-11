@@ -92,10 +92,7 @@ def resolve_trades(get_candle_func):
     
     active_list = load_active_trades() or []
     new_active = []
-    
-    # ✅ STEP 1: UUID TRACKER SET
     tracked_trade_uuids = set()
-    
     changes_made = False
 
     # 1. POSITION COUNT SYNC & RECONCILIATION
@@ -103,7 +100,6 @@ def resolve_trades(get_candle_func):
         all_positions = executor.get_all_positions()
         exchange_count = len(all_positions)
 
-        # AUTHORITATIVE EXCHANGE RECONCILIATION
         existing_symbols = {
             t.get("symbol")
             for t in active_list
@@ -118,14 +114,11 @@ def resolve_trades(get_candle_func):
                 continue
 
             print(f"🔄 REBUILDING MISSING TRADE: {symbol}")
-            
-            # Extract basics for fingerprinting
             side = "BULLISH" if pos.get("side") == "Buy" else "BEARISH"
             entry_price = float(pos.get("avgPrice", 0))
 
-            # ✅ STEP 4: ACTIVE TRADE RECOVERY MATCHING
             matched_trade = None
-            exchange_fingerprint = f"{symbol}_{side}_{round(entry_price, 4)}"
+            exchange_fingerprint = f"{symbol}_{side}_{round(size, 4)}" 
 
             for existing_trade in active_list:
                 existing_fp = existing_trade.get("exchange_fingerprint")
@@ -152,10 +145,8 @@ def resolve_trades(get_candle_func):
                     "recovered_from_exchange": True,
                 })
 
-            # ✅ STEP 2: UUID TRACKING IN RECONSTRUCTION
             reconstructed_trade = normalize_trade_schema(reconstructed_trade)
             trade_uuid = reconstructed_trade.get("trade_uuid")
-
             if trade_uuid not in tracked_trade_uuids:
                 tracked_trade_uuids.add(trade_uuid)
                 new_active.append(reconstructed_trade)
@@ -163,8 +154,13 @@ def resolve_trades(get_candle_func):
             existing_symbols.add(symbol)
             changes_made = True 
 
-        json_active_count = len([t for t in active_list if t.get("status") in ["OPEN", "ACTIVE"]])
-        live_open_count = max(exchange_count, json_active_count)
+        json_pending_count = len([
+            t for t in active_list
+            if t.get("status") in ["PENDING", "EXECUTING"]
+        ])
+
+        live_open_count = exchange_count + json_pending_count
+        print(f"📊 COUNTER RECONCILIATION: Exchange({exchange_count}) + LocalPending({json_pending_count}) = {live_open_count}")
 
     except Exception as e:
         print(f"⚠️ [RECONCILIATION_FAIL] {e}")
@@ -174,23 +170,19 @@ def resolve_trades(get_candle_func):
     for trade in active_list:
         symbol = trade["symbol"]
 
-        # -----------------------------------------
-        # PENDING TTL CLEANUP
-        # -----------------------------------------
+        # Handling Pending Expiry
         if trade.get("status") == "PENDING":
             age_sec = time.time() - trade.get("created_at", time.time())
-
             if not trade.get("order_id") and age_sec > 300:
                 print(f"🧹 EXPIRED PENDING SIGNAL: {symbol}")
                 trade["status"] = "CANCELLED"
                 trade["cancel_reason"] = "PENDING_TIMEOUT"
                 trade["closed_at"] = time.strftime('%Y-%m-%d %H:%M:%S')
-
                 append_closed_trade(trade)
                 changes_made = True
                 continue
 
-        # CLEAN STALE ORDERS WITH IDs
+        # Handling Stale Orders
         if trade.get("status") == "PENDING" and trade.get("order_id"):
             try:
                 open_orders = executor.get_open_orders(symbol)
@@ -204,9 +196,34 @@ def resolve_trades(get_candle_func):
                 print(f"❌ PENDING CLEAN FAIL {symbol}: {e}")
 
         # 3. EXECUTION PHASE
-        if not trade.get("order_id") and not trade.get("recovered_from_exchange"):
-            if live_open_count >= MAX_OPEN_TRADES:
-                # ✅ STEP 3: PREVENT DUPLICATES USING UUID
+        if (not trade.get("order_id") and not trade.get("recovered_from_exchange")):
+            execution_attempts = trade.get("execution_attempts", 0)
+            retry_after = trade.get("retry_after")
+
+            # Retry Limit
+            if execution_attempts >= 3:
+                print(f"❌ MAX EXECUTION RETRIES EXCEEDED: {symbol}")
+                trade["status"] = "FAILED"
+                trade["execution_state"] = "FAILED"
+                trade["closed_at"] = time.strftime('%Y-%m-%d %H:%M:%S')
+                append_closed_trade(trade)
+                append_trade_to_excel(trade)
+                changes_made = True
+                continue
+
+            # Cooldown check
+            if retry_after and time.time() < retry_after:
+                trade = normalize_trade_schema(trade)
+                trade_uuid = trade.get("trade_uuid")
+                if trade_uuid not in tracked_trade_uuids:
+                    tracked_trade_uuids.add(trade_uuid)
+                    new_active.append(trade)
+                continue
+
+            # Trade Limit Check
+            real_exchange_count = len(executor.get_all_positions())
+            if real_exchange_count >= MAX_OPEN_TRADES:
+                print(f"🛑 [LIMIT] Max exchange trades reached. Holding {symbol}.")
                 trade = normalize_trade_schema(trade)
                 trade_uuid = trade.get("trade_uuid")
                 if trade_uuid not in tracked_trade_uuids:
@@ -216,7 +233,6 @@ def resolve_trades(get_candle_func):
 
             candle = get_candle_func(symbol)
             if candle is None:
-                # ✅ STEP 3: PREVENT DUPLICATES USING UUID
                 trade = normalize_trade_schema(trade)
                 trade_uuid = trade.get("trade_uuid")
                 if trade_uuid not in tracked_trade_uuids:
@@ -224,19 +240,20 @@ def resolve_trades(get_candle_func):
                     new_active.append(trade)
                 continue
 
+            # Execute Order
             side = "Buy" if trade["bias"] == "BULLISH" else "Sell"
             qty = calculate_position_size(trade)
             if qty <= 0: continue
 
             try:
                 order = executor.place_market_order(symbol=symbol, side=side, qty=qty)
+                
                 if order and order.get("retCode") == 0:
                     trade["order_id"] = order["result"]["orderId"]
                     trade["status"] = "ACTIVE"
-                    # ✅ STEP 5: STATUS TRANSITIONS
+                    trade["execution_state"] = "ACTIVE"
+                    trade["execution_attempts"] = 0
                     trade["opened_at"] = int(time.time())
-                    trade["last_synced_at"] = int(time.time())
-                    
                     trade["is_active"] = True
                     trade["qty"] = qty
                     trade["filled_price"] = float(candle["close"])
@@ -244,6 +261,7 @@ def resolve_trades(get_candle_func):
 
                     initialize_tracking(trade)
 
+                    # Set SL/TP
                     risk_dist = abs(trade["entry"] - trade["sl"])
                     if trade["bias"] == "BULLISH":
                         sl, tp = trade["filled_price"] - risk_dist, trade["filled_price"] + (risk_dist * trade["rr_ratio"])
@@ -252,21 +270,45 @@ def resolve_trades(get_candle_func):
 
                     executor.set_trading_stop(symbol=symbol, stop_loss=round(sl, 6), take_profit=round(tp, 6))
                     register_execution_event(trade)
-                    
                     print(f"✅ EXECUTED {symbol}")
                     
-                    # ✅ STEP 3: PREVENT DUPLICATES USING UUID
+                    # ✅ FIX: PERSIST TO LOCAL STORAGE IMMEDIATELY AFTER SUCCESS
                     trade = normalize_trade_schema(trade)
                     trade_uuid = trade.get("trade_uuid")
                     if trade_uuid not in tracked_trade_uuids:
                         tracked_trade_uuids.add(trade_uuid)
                         new_active.append(trade)
                     
-                    live_open_count += 1
                     changes_made = True
                     continue
+                else:
+                    # Failure Handling
+                    trade["execution_attempts"] = trade.get("execution_attempts", 0) + 1
+                    err_msg = order.get("retMsg", "UNKNOWN_ERROR") if isinstance(order, dict) else "NO_RESP"
+                    trade["last_execution_error"] = err_msg
+                    trade["retry_after"] = time.time() + (30 * trade["execution_attempts"])
+                    trade["execution_state"] = "RETRYING"
+                    
+                    trade = normalize_trade_schema(trade)
+                    trade_uuid = trade.get("trade_uuid")
+                    if trade_uuid not in tracked_trade_uuids:
+                        tracked_trade_uuids.add(trade_uuid)
+                        new_active.append(trade)
+                    changes_made = True
+                    continue
+                    
             except Exception as e:
-                print(f"❌ EXECUTION ERROR {symbol}: {e}")
+                trade["execution_attempts"] = trade.get("execution_attempts", 0) + 1
+                trade["retry_after"] = time.time() + 60
+                trade["execution_state"] = "RETRYING"
+                print(f"❌ EXECUTION EXCEPTION {symbol}: {e}")
+                
+                trade = normalize_trade_schema(trade)
+                trade_uuid = trade.get("trade_uuid")
+                if trade_uuid not in tracked_trade_uuids:
+                    tracked_trade_uuids.add(trade_uuid)
+                    new_active.append(trade)
+                changes_made = True
                 continue
 
         # 4. POSITION SYNC & TRACKING
@@ -282,16 +324,34 @@ def resolve_trades(get_candle_func):
                         if size > 0:
                             exchange_found = True
                             trade["unrealized_pnl"] = float(pos.get("unrealisedPnl", 0))
-                            # ✅ STEP 6: ACTIVE SYNC TIMESTAMPS
                             trade["last_synced_at"] = int(time.time())
                             trade["entry_price_real"] = float(pos.get("avgPrice", 0))
+
+                            # Sync SL/TP Orders
+                            try:
+                                open_orders = executor.get_open_orders(symbol)
+                                tp_exists, sl_exists = False, False
+                                if open_orders and open_orders.get("retCode") == 0:
+                                    for order in open_orders["result"].get("list", []):
+                                        if order.get("reduceOnly") is not True: continue
+                                        stop_type = order.get("stopOrderType")
+                                        if stop_type == "TakeProfit": tp_exists = True
+                                        elif stop_type == "StopLoss": sl_exists = True
+
+                                trade["tp_order_exists"] = tp_exists
+                                trade["sl_order_exists"] = sl_exists
+                                trade["protection_status"] = "HEALTHY" if (sl_exists and tp_exists) else "BROKEN"
+
+                            except Exception as sync_e:
+                                print(f"⚠️ SYNC FAIL {symbol}: {sync_e}")
+
                             update_tracking(trade)
                             register_telemetry_event(trade)
                             break
 
                 if not exchange_found:
+                    # Logic for handling closed positions (missing from exchange)
                     if (time.time() - trade.get("executed_at", 0)) < 20:
-                        # ✅ STEP 3: PREVENT DUPLICATES USING UUID
                         trade = normalize_trade_schema(trade)
                         trade_uuid = trade.get("trade_uuid")
                         if trade_uuid not in tracked_trade_uuids:
@@ -301,7 +361,6 @@ def resolve_trades(get_candle_func):
 
                     trade["missing_counter"] = trade.get("missing_counter", 0) + 1
                     if trade["missing_counter"] < 3:
-                        # ✅ STEP 3: PREVENT DUPLICATES USING UUID
                         trade = normalize_trade_schema(trade)
                         trade_uuid = trade.get("trade_uuid")
                         if trade_uuid not in tracked_trade_uuids:
@@ -309,33 +368,26 @@ def resolve_trades(get_candle_func):
                             new_active.append(trade)
                         continue
                     else:
-                        print(f"✅ POSITION CLOSED DETECTED: {symbol}")
+                        print(f"✅ POSITION CLOSED: {symbol}")
                         latest_candle = get_candle_func(symbol)
                         exit_price = float(latest_candle["close"]) if latest_candle else trade.get("entry_price_real", trade["entry"])
                         finalize_tracking(trade)
                         pnl = float(trade.get("unrealized_pnl", 0))
-                        result_label = "WIN" if pnl > 0 else ("LOSS" if pnl < 0 else "BREAKEVEN")
+                        result_label = "WIN" if pnl > 0 else "LOSS"
                         closed_trade = close_trade(trade, exit_price, result_label)
-                        
                         register_close_event(closed_trade)
                         append_closed_trade(closed_trade)
                         append_trade_to_excel(closed_trade)
                         changes_made = True
                         continue 
-                else:
-                    trade["missing_counter"] = 0 
             except Exception as e:
                 print(f"❌ POSITION SYNC FAIL {symbol}: {e}")
 
-        # -----------------------------------------
-        # PREVENT DOUBLE APPEND
-        # -----------------------------------------
-        # ✅ STEP 3: PREVENT DUPLICATES USING UUID
+        # Final safety append for existing active trades
         trade = normalize_trade_schema(trade)
         trade_uuid = trade.get("trade_uuid")
         if trade_uuid not in tracked_trade_uuids:
             tracked_trade_uuids.add(trade_uuid)
             new_active.append(trade)
 
-    if changes_made:
-        save_active_trades(new_active)
+    save_active_trades(new_active)
