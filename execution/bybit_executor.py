@@ -10,6 +10,9 @@ from dotenv import load_dotenv
 # Load environment variables for secure API access
 load_dotenv()
 
+# ✅ STEP 1 — ADD EXECUTION CONTEXT IMPORT
+from core.execution_context import execution_context
+
 class ServerTimeSync:
     """
     Utility to sync local clock with Bybit server time to avoid 
@@ -41,7 +44,7 @@ class ServerTimeSync:
 class BybitExecutor:
     """
     Bybit V5 Executor: Custom Signer Mode.
-    Handles authentication and private endpoints for Trading and Account data.
+    Handles authentication and private endpoints with safety gating for LIVE mode.
     """
 
     def __init__(self, api_key=None, api_secret=None):
@@ -105,7 +108,6 @@ class BybitExecutor:
     def get_positions(self, symbol=None):
         """Fetches raw positions. If symbol is None, returns all linear positions."""
         try:
-            # ✅ FIX 1: settleCoin="USDT" is mandatory for Unified Trading Accounts
             payload = {
                 "category": "linear",
                 "settleCoin": "USDT"
@@ -123,26 +125,21 @@ class BybitExecutor:
     def get_all_positions(self):
         """
         Returns ONLY active open positions as a clean, standardized list.
-        Detects positions based on size or floating PnL.
         """
         try:
+            MIN_POSITION_SIZE = 0.0001
+            
             response = self.get_positions()
             raw_positions = response.get("result", {}).get("list", [])
             
-            # ✅ DEBUG STEP: Print raw output to terminal to verify Bybit is returning data
-            print(f"🔍 [DEBUG] Raw Positions Fetched: {len(raw_positions)}")
-            if raw_positions:
-                print(f"🔍 [DEBUG] Sample Position: {raw_positions[0].get('symbol')} | Size: {raw_positions[0].get('size')}")
-
             clean_positions = []
 
             for pos in raw_positions:
                 try:
                     size = abs(float(pos.get("size", 0)))
-                    unrealized = float(pos.get("unrealisedPnl", 0))
-
-                    # Logic: If size exists OR PnL is non-zero, it's an active trade
-                    if size > 0 or abs(unrealized) > 0:
+                    if size > MIN_POSITION_SIZE:
+                        unrealized = float(pos.get("unrealisedPnl", 0))
+                        
                         clean_positions.append({
                             "symbol": pos.get("symbol"),
                             "side": pos.get("side"),
@@ -183,7 +180,6 @@ class BybitExecutor:
             coins = accounts[0].get("coin", [])
             for coin in coins:
                 if coin.get("coin") == "USDT":
-                    # Priority: Equity (Balance + PnL)
                     return float(coin.get("equity", coin.get("walletBalance", 0)))
             return 0.0
         except Exception as e:
@@ -191,10 +187,7 @@ class BybitExecutor:
             return 0.0
 
     def get_open_orders(self, symbol=None):
-        """
-        ✅ FIX 2: Fetches currently active orders (Limit, TP, SL).
-        Requires settleCoin="USDT" to accurately query the Unified Margin pool.
-        """
+        """Fetches currently active orders (Limit, TP, SL)."""
         try:
             payload = {
                 "category": "linear",
@@ -214,7 +207,17 @@ class BybitExecutor:
             return []
 
     def place_market_order(self, symbol, side, qty):
-        """Executes a market order."""
+        """
+        Executes a market order.
+        ✅ STEP 2 — BLOCK LIVE EXECUTION OUTSIDE LIVE MODE
+        """
+        if not execution_context.is_live():
+            print(f"🛑 BLOCKED: Non-live mode execution attempted for {symbol}")
+            return {
+                "retCode": -1,
+                "retMsg": "EXECUTION_BLOCKED_NON_LIVE_MODE"
+            }
+
         try:
             payload = {
                 "category": "linear",
@@ -230,7 +233,17 @@ class BybitExecutor:
             return None 
 
     def set_trading_stop(self, symbol, stop_loss=None, take_profit=None):
-        """Sets exchange-native TP/SL on an active position."""
+        """
+        Sets exchange-native TP/SL on an active position.
+        ✅ STEP 3 — BLOCK TP/SL MUTATION OUTSIDE LIVE MODE
+        """
+        if not execution_context.is_live():
+            print(f"🛑 BLOCKED: TP/SL mutation outside LIVE mode for {symbol}")
+            return {
+                "retCode": -1,
+                "retMsg": "TP_SL_BLOCKED_NON_LIVE_MODE"
+            }
+
         try:
             payload = {"category": "linear", "symbol": symbol, "tpslMode": "Full"}
             if stop_loss: payload["stopLoss"] = str(stop_loss)

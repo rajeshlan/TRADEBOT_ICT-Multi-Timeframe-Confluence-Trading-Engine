@@ -10,7 +10,6 @@ from components.styles import load_css
 from components.metric_cards import render_metric_card
 from components.position_cards import render_position_card
 from components.history_cards import render_history_card
-# Renamed import as requested
 from components.live_feed import render_live_feed
 from components.risk_panel import render_risk_panel
 from components.charts import (
@@ -34,6 +33,9 @@ sys.path.append(
 from storage.trade_logger import load_active_trades, load_closed_trades
 from analytics.trade_analytics import compute_pair_stats
 from core.executor import executor
+
+# ✅ NEW: IMPORT RUNTIME LOGGER DATA
+from utils.runtime_logger import load_runtime_events
 
 # =========================================================
 # PAGE CONFIG & THEME
@@ -61,6 +63,9 @@ live_positions = executor.get_all_positions()
 closed_trades = load_closed_trades()
 open_orders = executor.get_open_orders()
 current_balance = get_balance_cached()
+
+# ✅ NEW: FETCH RUNTIME EVENTS
+runtime_events = load_runtime_events()
 
 # Aggregations
 floating_pnl = sum(float(p.get("unrealisedPnl", 0)) for p in live_positions)
@@ -107,11 +112,17 @@ with left_col:
                 render_position_card(p)
 
     st.markdown("---")
-    st.subheader("⚡ Live Signal Feed")
-    if closed_trades:
-        # Renamed function usage here
-        for t in list(reversed(closed_trades[-10:])):
-            render_live_feed(t)
+    
+    # ✅ REPLACED: LIVE SIGNAL FEED -> LIVE ENGINE FEED
+    st.subheader("⚡ Live Engine Feed")
+
+    if runtime_events:
+        # Show the last 25 system events, newest first
+        recent_events = list(reversed(runtime_events[-25:]))
+        for event in recent_events:
+            render_live_feed(event)
+    else:
+        st.info("No runtime events yet. Waiting for engine activity...")
 
 # --- RIGHT COLUMN: ANALYTICS & RISK ---
 with right_col:

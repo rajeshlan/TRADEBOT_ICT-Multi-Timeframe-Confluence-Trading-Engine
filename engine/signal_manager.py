@@ -1,13 +1,29 @@
 import time
-# STEP 1: ADD IMPORT (Feature Engine Integration)
+import os
+
+# FEATURE ENGINE & SCHEMA IMPORTS
 from core.setup_memory.feature_engine import build_features
-# ✅ STEP 6: IMPORT SCHEMA NORMALIZER
 from core.trade_schema import normalize_trade_schema
+from core.market_regime_engine import classify_market_regime
+
+# ✅ UPGRADE 7: IMPORT SETUP GRADER
+from core.setup_grader import grade_trade_setup
+
+# ✅ SYSTEM STATE & SESSION IMPORTS
+from core.system_state import drawdown_guard
+from core.session_engine import get_current_session
+
+# ✅ STEP 1 — ADD CORRELATION & STORAGE IMPORTS
+from core.correlation_engine import correlated_positions_count
+from storage.trade_logger import load_active_trades
+
+# ✅ STEP 2 — ADD RUNTIME LOGGER IMPORT
+from utils.runtime_logger import log_runtime_event
 
 class SignalManager:
     """
-    Manages the lifecycle of trading signals, applying ICT-based discipline 
-    and multi-timeframe confluence filtering.
+    Manages the lifecycle of trading signals, applying ICT-based discipline,
+    adaptive market-regime logic, session intelligence, and correlation awareness.
     """
 
     def __init__(self):
@@ -21,28 +37,32 @@ class SignalManager:
 
     def process(self, symbol, results_by_tf):
         """
-        🚀 PHASE 6.3 — DISCIPLINE ENGINE (Risk Filter Edition)
-        Filters raw technical data into actionable trading signals with feature enrichment.
+        🚀 PHASE 9.0 — OBSERVABILITY & AUDIT LOGGING
+        Evaluates signals and logs decision events for post-trade analysis.
         """
         now = time.time()
 
-        # STEP 2: BUILD CANDLE REGISTRY
-        # This captures the raw market context needed for ATR and Regime analysis
+        # STEP 1: BUILD CANDLE REGISTRY
         candles_by_tf = {}
         for tf, result in results_by_tf.items():
             if result and result.get("candles"):
                 candles_by_tf[tf] = result["candles"]
 
-        # 2️⃣ STEP 1: COOLDOWN FILTER
+        # 2️⃣ STEP 2: COOLDOWN FILTER
         last_symbol_time = self.last_signal_time.get(symbol)
         if last_symbol_time and (now - last_symbol_time < self.cooldown_seconds):
             print(f"[SKIP] {symbol} in system cooldown")
+            
+            # ✅ LOG COOLDOWN EVENT
+            log_runtime_event(
+                event_type="SCAN_SKIPPED",
+                symbol=symbol,
+                data={"reason": "COOLDOWN"}
+            )
             return None
 
         # 🔹 TIMEFRAME WEIGHTING
-        weights = {
-            "1M": 35, "1d": 30, "4h": 25, "2h": 15, "30m": 10, "5m": 5
-        }
+        weights = {"1M": 35, "1d": 30, "4h": 25, "2h": 15, "30m": 10, "5m": 5}
 
         score = 0
         valid_timeframes = []
@@ -50,7 +70,7 @@ class SignalManager:
         ltf_present = False
         htf_bias = None
 
-        # --- STEP 2: ESTABLISH HTF BIAS ---
+        # --- STEP 3: ESTABLISH HTF BIAS ---
         for tf in ["1M", "1d", "4h"]:
             if tf in results_by_tf:
                 res = results_by_tf[tf]
@@ -61,10 +81,53 @@ class SignalManager:
         if not htf_bias:
             return None
 
-        # Determine if we are looking for BUYS or SELLS
         bias = "BULLISH" if "BULLISH" in htf_bias else "BEARISH"
 
-        # --- STEP 3: CONFLUENCE & SCORING ---
+        # ---------------------------------------------------------
+        # 🚀 MARKET REGIME CLASSIFICATION
+        # ---------------------------------------------------------
+        lower_tf_candles = candles_by_tf.get("30m", [])
+        market_regime = "UNKNOWN"
+        
+        if lower_tf_candles:
+            market_regime = classify_market_regime(lower_tf_candles)
+            
+            # ADAPTIVE SCORING MODIFIERS
+            if market_regime == "RANGING": score -= 10
+            elif market_regime == "COMPRESSED": score -= 15
+            elif market_regime == "TRENDING": score += 8
+            elif market_regime == "VOLATILE": score -= 5
+
+        # ---------------------------------------------------------
+        # ✅ SESSION-BASED SCORING
+        # ---------------------------------------------------------
+        current_session = get_current_session()
+
+        if current_session == "NEW_YORK": score += 10
+        elif current_session == "LONDON": score += 6
+        elif current_session == "ASIA": score -= 4
+        elif current_session == "DEAD": score -= 12
+
+        # ---------------------------------------------------------
+        # ✅ CORRELATION EXPOSURE LOGIC
+        # ---------------------------------------------------------
+        active_trades = load_active_trades() or []
+        correlated_count = correlated_positions_count(symbol, active_trades)
+
+        if correlated_count >= 2:
+            print(f"⚠️ CORRELATED EXPOSURE HIGH: {symbol} (Count: {correlated_count})")
+            
+            # ✅ LOG CORRELATION WARNING
+            log_runtime_event(
+                event_type="CORRELATION_WARNING",
+                symbol=symbol,
+                data={"correlated_count": correlated_count}
+            )
+            score -= 15
+        elif correlated_count == 1:
+            score -= 6
+
+        # --- STEP 4: CONFLUENCE & SCORING ---
         for tf, result in results_by_tf.items():
             if not result: continue
 
@@ -72,7 +135,6 @@ class SignalManager:
             fvg = result.get("fvg")
             liq = result.get("liquidity")
 
-            # 🧪 ALIGNMENT CHECKS
             has_liq = liq.get("has_liquidity", False) if liq else False
             has_ob = bool(ob and ob.get("type") == htf_bias)
             
@@ -89,7 +151,6 @@ class SignalManager:
             if tf in ["1M", "1d", "4h"]: htf_present = True
             if tf in ["5m", "30m"]: ltf_present = True
 
-            # --- ⚙️ LIQUIDITY SCORING ---
             if has_liq:
                 score += 5
                 if liq.get("swept"):
@@ -101,16 +162,13 @@ class SignalManager:
                     )
                     score += 10 if correct_dir else 3
 
-        # --- STEP 4: TUNED FILTERS ---
-        if len(valid_timeframes) < 1:
-            return None
+        # ✅ DEFENSIVE FILTER
+        if drawdown_guard.should_reduce_risk():
+            print("⚠️ DEFENSIVE MODE ACTIVE: Applying -12 confluence penalty.")
+            score -= 12 
 
-        if not (htf_present and ltf_present):
-            print(f"[REJECTED] {symbol} Missing HTF/LTF alignment")
-            return None
-
-        if not any(results_by_tf[tf].get("liquidity", {}).get("has_liquidity") for tf in valid_timeframes):
-            print(f"[REJECTED] {symbol} No liquidity confluence")
+        # --- STEP 5: VALIDATION FILTERS ---
+        if len(valid_timeframes) < 1 or not (htf_present and ltf_present):
             return None
 
         if score < 25: 
@@ -120,8 +178,8 @@ class SignalManager:
         if key in self.last_signals and (now - self.last_signals[key] < self.cooldown):
             return None
 
-        # --- STEP 5: LEVEL EXTRACTION & TP/SL LOGIC ---
-        best_tf, best_ob = None, None
+        # --- STEP 6: LEVEL EXTRACTION & ADAPTIVE RR LOGIC ---
+        best_ob = None
         sorted_tfs = sorted(valid_timeframes, key=lambda x: weights.get(x, 0), reverse=True)
         
         for tf in sorted_tfs:
@@ -138,59 +196,87 @@ class SignalManager:
         sl = best_ob.get("sl")
 
         if entry and sl:
-            # 🔴 RISK DISTANCE FILTER
             risk_pct = abs(entry - sl) / entry * 100
-            if risk_pct > 5:
-                print(f"[REJECTED] {symbol} Risk too wide: {risk_pct:.2f}%")
+            if risk_pct > 5: return None
+
+            rr_ratio = 2.0 
+            if market_regime == "TRENDING": rr_ratio = 2.8
+            elif market_regime == "RANGING": rr_ratio = 1.6
+            elif market_regime == "VOLATILE": rr_ratio = 1.8
+            elif market_regime == "COMPRESSED": rr_ratio = 1.4
+
+            # ---------------------------------------------------------
+            # ✅ SETUP GRADING & FILTERING
+            # ---------------------------------------------------------
+            setup_grade = grade_trade_setup(
+                score=score,
+                market_regime=market_regime,
+                rr_ratio=rr_ratio
+            )
+
+            if setup_grade == "C":
+                print(f"[REJECTED] {symbol} Grade too weak: C")
+                
+                # ✅ LOG GRADE REJECTION
+                log_runtime_event(
+                    event_type="SETUP_REJECTED",
+                    symbol=symbol,
+                    data={
+                        "reason": "GRADE_C",
+                        "grade": setup_grade,
+                        "score": score,
+                        "market_regime": market_regime,
+                        "session": current_session
+                    }
+                )
                 return None
 
-            # 🛠️ TP/SL CALCULATION
+            # ✅ STEP 6 — DEBUG LOGGING
+            print(
+                f"🏆 {symbol} | "
+                f"SESSION={current_session} | "
+                f"🔗 CORR_COUNT={correlated_count} | "
+                f"GRADE={setup_grade} | "
+                f"SCORE={score}"
+            )
+
+            # ✅ LOG SETUP APPROVAL
+            log_runtime_event(
+                event_type="SETUP_APPROVED",
+                symbol=symbol,
+                data={
+                    "grade": setup_grade,
+                    "score": score,
+                    "session": current_session,
+                    "market_regime": market_regime,
+                    "bias": bias,
+                    "timeframes": valid_timeframes,
+                    "correlated_exposure": correlated_count
+                }
+            )
+
             risk_amount = abs(entry - sl)
-            rr_ratio = 2.0  # Standard 1:2 Reward to Risk
+            tp = entry + (risk_amount * rr_ratio) if bias == "BULLISH" else entry - (risk_amount * rr_ratio)
 
-            if bias == "BULLISH":
-                tp = entry + (risk_amount * rr_ratio)
-            else:
-                tp = entry - (risk_amount * rr_ratio)
-
-            # ---------------------------------------------------------
-            # 🚀 PHASE 6.3.1: ENRICH SIGNAL BEFORE RETURN
-            # ---------------------------------------------------------
-            # ✅ STEP 6: WRAP SIGNAL WITH NORMALIZER
+            # --- STEP 7: ENRICH SIGNAL ---
             signal = normalize_trade_schema({
-                "symbol": symbol,
-                "bias": bias,
-                "timeframes": valid_timeframes,
-                "confluence_score": min(score, 100),
-
-                "entry": round(entry, 4),
-                "sl": round(sl, 4),
-                "tp": round(tp, 4),
-
-                "rr": f"1:{rr_ratio}",
-                "risk_pct_distance": round(risk_pct, 2),
-
-                "details": f"Refined ICT Discipline Engine ({best_tf} Source)"
+                "symbol": symbol, "bias": bias, "timeframes": valid_timeframes,
+                "confluence_score": min(score, 100), "market_regime": market_regime,
+                "setup_grade": setup_grade, "session": current_session,
+                "correlated_exposure": correlated_count, "entry": round(entry, 4),
+                "sl": round(sl, 4), "tp": round(tp, 4), "rr_ratio": rr_ratio,
+                "rr": f"1:{rr_ratio}", "risk_pct_distance": round(risk_pct, 2),
+                "details": f"Institutional Exposure Engine ({best_tf} Source)"
             })
 
-            # 🚀 FEATURE ENRICHMENT LAYER
             try:
-                enriched = build_features(
-                    signal=signal,
-                    results_by_tf=results_by_tf,
-                    candles_by_tf=candles_by_tf
-                )
-
-                if enriched and isinstance(enriched, dict):
-                    signal.update(enriched)
-
+                enriched = build_features(signal, results_by_tf, candles_by_tf)
+                if enriched: signal.update(enriched)
             except Exception as e:
-                print(f"[FEATURE_ENGINE_ERROR] {symbol}: {e}")
+                print(f"[FEATURE_ERROR] {symbol}: {e}")
 
-            # Finalize tracking
             self.last_signals[key] = now
             self.last_signal_time[symbol] = now
-
             return signal
 
         return None
