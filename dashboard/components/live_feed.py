@@ -4,19 +4,20 @@ import json
 import html
 
 # Standardized event styling, visual encodings, and priority flags
+# Emojis have been replaced with clean, standard UTF-8 Unicode characters.
 EVENT_STYLES = {
     "PROTECTION_WARNING": {"color": "#ff6d00", "emoji": "🚨"},
     "NEGATIVE_EXPECTANCY_GATE": {"color": "#ff7043", "emoji": "🚫"},
     "SETUP_APPROVED": {"color": "#00ff99", "emoji": "🟢"},
     "SETUP_REJECTED": {"color": "#ff4b4b", "emoji": "🔴"},
-    "SCAN_SKIPPED": {"color": "#ffaa00", "emoji": "⏭"},
+    "SCAN_SKIPPED": {"color": "#ffaa00", "emoji": "⏭️"},
     "SIGNAL_CREATED": {"color": "#00ccff", "emoji": "⚡"},
     "TRADE_EXECUTED": {"color": "#00e676", "emoji": "🚀"},
     "TRADE_CLOSED": {"color": "#b388ff", "emoji": "📘"},
     "SYSTEM_LIMIT": {"color": "#ff9800", "emoji": "🛑"},
     "EXECUTION_FAILED": {"color": "#ff1744", "emoji": "💥"},
     "CORRELATION_WARNING": {"color": "#ffd54f", "emoji": "⚠️"},
-    "SYMBOL_SKIPPED": {"color": "#aaaaaa", "emoji": "⏭️"}
+    "SYMBOL_SKIPPED": {"color": "#aaaaaa", "emoji": "⏹️"}
 }
 
 # Persistent in-memory storage to track execution cooldowns across reruns
