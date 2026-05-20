@@ -8,8 +8,13 @@ from datetime import datetime
 BASE_TRADE_SCHEMA = {
     # Identity
     "trade_uuid": None,
+    "setup_id": None,
+    "decision_id": None,
+    "order_intent_id": None,
     "exchange_fingerprint": None,    # Deterministic key for exchange matching
     "exchange_position_id": None,    # ID provided by the exchange (e.g., Bybit)
+    "exchange_order_id": None,
+    "position_id": None,
     "id": None,
     "order_id": None,
 
@@ -36,6 +41,28 @@ BASE_TRADE_SCHEMA = {
     "sl": None,
     "tp": None,
     "rr_ratio": 0.0,
+    "risk_pct": None,
+    "risk_pct_distance": None,
+
+    # Signal Intelligence
+    "confluence_score": None,
+    "setup_grade": None,
+    "archetype": None,
+    "expected_value_r": None,
+    "approval_threshold_r": None,
+    "win_probability": None,
+    "quality_reasons": [],
+    "trend_quality": None,
+    "chop_score": None,
+    "squeeze_risk": None,
+    "cascade_risk": None,
+    "liquidity_vacuum": False,
+    "funding_rate": None,
+    "spread_bps": None,
+    "book_imbalance": None,
+    "open_interest_change_pct": None,
+    "market_regime": None,
+    "session": None,
     
     # Order Tracking (Order Sync Patch)
     "tp_order_exists": False,
@@ -95,17 +122,23 @@ def normalize_trade_schema(trade: dict) -> dict:
 
     # ✅ IMPROVED FINGERPRINTING
     # Build deterministic exchange fingerprint using Symbol, Bias, and Qty
-    if not normalized.get("exchange_fingerprint"):
-        symbol = normalized.get("symbol", "UNKNOWN")
-        side = normalized.get("bias", "UNKNOWN")
-        
-        try:
-            qty_val = float(normalized.get("qty") or 0)
-        except (ValueError, TypeError):
-            qty_val = 0.0
-            
-        qty_str = round(qty_val, 4)
+    symbol = normalized.get("symbol", "UNKNOWN")
+    side = normalized.get("bias", "UNKNOWN")
 
+    try:
+        qty_val = float(normalized.get("qty") or 0)
+    except (ValueError, TypeError):
+        qty_val = 0.0
+
+    qty_str = round(qty_val, 4)
+    existing_fingerprint = normalized.get("exchange_fingerprint")
+    stale_zero_fingerprint = (
+        existing_fingerprint
+        and existing_fingerprint.endswith("_0.0")
+        and qty_val > 0
+    )
+
+    if not existing_fingerprint or stale_zero_fingerprint:
         normalized["exchange_fingerprint"] = (
             f"{symbol}_{side}_{qty_str}"
         )

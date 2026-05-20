@@ -157,7 +157,8 @@ def run_cycle():
 
             # 5. Risk Management
             stats = get_stats()
-            kelly_val = kelly_fraction(stats["winrate"], stats["rr"]) if stats else 0.02
+            winrate_decimal = (stats["winrate"] / 100) if stats else 0.0
+            kelly_val = kelly_fraction(winrate_decimal, stats["rr"]) if stats else 0.02
             risk = min(kelly_val * 100, MAX_RISK_PER_TRADE)
             decision["risk_pct"] = round(risk, 2)
 
@@ -174,7 +175,11 @@ def run_cycle():
                     "grade": decision.get("setup_grade"),
                     "bias": decision.get("bias"),
                     "rr": decision.get("rr"),
-                    "risk_pct": decision.get("risk_pct")
+                    "risk_pct": decision.get("risk_pct"),
+                    "setup_id": decision.get("setup_id"),
+                    "decision_id": decision.get("decision_id"),
+                    "archetype": decision.get("archetype"),
+                    "expected_value_r": decision.get("expected_value_r"),
                 }
             )
 

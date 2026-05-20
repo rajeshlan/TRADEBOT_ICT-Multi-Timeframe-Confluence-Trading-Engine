@@ -5,6 +5,13 @@ import os
 from core.setup_memory.feature_engine import build_features
 from core.trade_schema import normalize_trade_schema
 from core.market_regime_engine import classify_market_regime
+from core.market_context import get_market_context
+from core.signal_quality import (
+    assess_signal_quality,
+    classify_archetype,
+    expected_value_assessment,
+)
+from core.ids import build_decision_id, build_setup_id
 
 # ✅ UPGRADE 7: IMPORT SETUP GRADER
 from core.setup_grader import grade_trade_setup
@@ -15,7 +22,8 @@ from core.session_engine import get_current_session
 
 # ✅ STEP 1 — ADD CORRELATION & STORAGE IMPORTS
 from core.correlation_engine import correlated_positions_count
-from storage.trade_logger import load_active_trades
+from storage.trade_logger import load_active_trades, load_closed_trades
+from analytics.research import empirical_prior_for
 
 # ✅ STEP 2 — ADD RUNTIME LOGGER IMPORT
 from utils.runtime_logger import log_runtime_event
@@ -205,6 +213,85 @@ class SignalManager:
             elif market_regime == "VOLATILE": rr_ratio = 1.8
             elif market_regime == "COMPRESSED": rr_ratio = 1.4
 
+            risk_amount = abs(entry - sl)
+            tp = entry + (risk_amount * rr_ratio) if bias == "BULLISH" else entry - (risk_amount * rr_ratio)
+
+            market_context = get_market_context(symbol)
+            preliminary_signal = {
+                "symbol": symbol,
+                "bias": bias,
+                "timeframes": valid_timeframes,
+                "confluence_score": min(score, 100),
+                "market_regime": market_regime,
+                "session": current_session,
+                "correlated_exposure": correlated_count,
+                "entry": round(entry, 4),
+                "sl": round(sl, 4),
+                "tp": round(tp, 4),
+                "rr_ratio": rr_ratio,
+                "risk_pct_distance": round(risk_pct, 2),
+            }
+            preliminary_signal["archetype"] = classify_archetype(
+                preliminary_signal,
+                results_by_tf,
+                candles_by_tf,
+            )
+            preliminary_signal.update({
+                "funding_rate": market_context.get("funding_rate"),
+                "spread_bps": market_context.get("spread_bps"),
+                "book_imbalance": market_context.get("book_imbalance"),
+                "open_interest_change_pct": market_context.get("open_interest_change_pct"),
+            })
+
+            quality = assess_signal_quality(
+                preliminary_signal,
+                results_by_tf,
+                candles_by_tf,
+                market_context,
+            )
+            score = max(0, min(score + quality["score_delta"], 100))
+            preliminary_signal["confluence_score"] = score
+            preliminary_signal.update(quality)
+
+            if quality["hard_reject"]:
+                log_runtime_event(
+                    event_type="SETUP_REJECTED",
+                    symbol=symbol,
+                    data={
+                        "reason": "QUALITY_HARD_REJECT",
+                        "quality_reasons": quality["reject_reasons"],
+                        "score": score,
+                        "market_regime": market_regime,
+                        "session": current_session,
+                        "bias": bias,
+                    }
+                )
+                return None
+
+            empirical = empirical_prior_for(preliminary_signal, load_closed_trades())
+            expectancy = expected_value_assessment(
+                preliminary_signal,
+                quality,
+                empirical,
+            )
+            preliminary_signal.update(expectancy)
+
+            if not expectancy["approved"]:
+                log_runtime_event(
+                    event_type="SETUP_REJECTED",
+                    symbol=symbol,
+                    data={
+                        "reason": "NEGATIVE_EXPECTANCY_GATE",
+                        "archetype": preliminary_signal.get("archetype"),
+                        "expected_value_r": expectancy["expected_value_r"],
+                        "approval_threshold_r": expectancy["approval_threshold_r"],
+                        "win_probability": expectancy["win_probability"],
+                        "score": score,
+                        "quality_reasons": quality["reject_reasons"],
+                    }
+                )
+                return None
+
             # ---------------------------------------------------------
             # ✅ SETUP GRADING & FILTERING
             # ---------------------------------------------------------
@@ -237,21 +324,32 @@ class SignalManager:
                 f"SESSION={current_session} | "
                 f"🔗 CORR_COUNT={correlated_count} | "
                 f"GRADE={setup_grade} | "
-                f"SCORE={score}"
+                f"SCORE={score} | "
+                f"EV_R={expectancy['expected_value_r']}"
             )
+
+            preliminary_signal["setup_grade"] = setup_grade
+            preliminary_signal["setup_id"] = build_setup_id(preliminary_signal)
+            preliminary_signal["decision_id"] = build_decision_id(preliminary_signal)
 
             # ✅ LOG SETUP APPROVAL
             log_runtime_event(
                 event_type="SETUP_APPROVED",
                 symbol=symbol,
                 data={
+                    "setup_id": preliminary_signal["setup_id"],
+                    "decision_id": preliminary_signal["decision_id"],
                     "grade": setup_grade,
                     "score": score,
                     "session": current_session,
                     "market_regime": market_regime,
                     "bias": bias,
                     "timeframes": valid_timeframes,
-                    "correlated_exposure": correlated_count
+                    "correlated_exposure": correlated_count,
+                    "archetype": preliminary_signal.get("archetype"),
+                    "expected_value_r": expectancy["expected_value_r"],
+                    "win_probability": expectancy["win_probability"],
+                    "quality_reasons": quality["reject_reasons"],
                 }
             )
 
@@ -259,15 +357,16 @@ class SignalManager:
             tp = entry + (risk_amount * rr_ratio) if bias == "BULLISH" else entry - (risk_amount * rr_ratio)
 
             # --- STEP 7: ENRICH SIGNAL ---
-            signal = normalize_trade_schema({
-                "symbol": symbol, "bias": bias, "timeframes": valid_timeframes,
-                "confluence_score": min(score, 100), "market_regime": market_regime,
-                "setup_grade": setup_grade, "session": current_session,
-                "correlated_exposure": correlated_count, "entry": round(entry, 4),
-                "sl": round(sl, 4), "tp": round(tp, 4), "rr_ratio": rr_ratio,
-                "rr": f"1:{rr_ratio}", "risk_pct_distance": round(risk_pct, 2),
-                "details": f"Institutional Exposure Engine ({best_tf} Source)"
+            preliminary_signal.update({
+                "rr": f"1:{rr_ratio}",
+                "quality_reasons": quality["reject_reasons"],
+                "details": (
+                    f"Institutional Exposure Engine ({best_tf} Source) | "
+                    f"{preliminary_signal.get('archetype')} | "
+                    f"EV_R={expectancy['expected_value_r']}"
+                ),
             })
+            signal = normalize_trade_schema(preliminary_signal)
 
             try:
                 enriched = build_features(signal, results_by_tf, candles_by_tf)

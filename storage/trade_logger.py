@@ -127,6 +127,29 @@ def log_trade(signal, current_balance):
         "sl": signal["sl"],
         "tp": signal["tp"],
         "rr_ratio": round(rr_calc, 2),
+        "setup_id": signal.get("setup_id"),
+        "decision_id": signal.get("decision_id"),
+        "timeframes": signal.get("timeframes", []),
+        "confluence_score": signal.get("confluence_score"),
+        "setup_grade": signal.get("setup_grade"),
+        "archetype": signal.get("archetype"),
+        "market_regime": signal.get("market_regime"),
+        "session": signal.get("session"),
+        "risk_pct": signal.get("risk_pct"),
+        "risk_pct_distance": signal.get("risk_pct_distance"),
+        "expected_value_r": signal.get("expected_value_r"),
+        "approval_threshold_r": signal.get("approval_threshold_r"),
+        "win_probability": signal.get("win_probability"),
+        "quality_reasons": signal.get("quality_reasons", []),
+        "trend_quality": signal.get("trend_quality"),
+        "chop_score": signal.get("chop_score"),
+        "squeeze_risk": signal.get("squeeze_risk"),
+        "cascade_risk": signal.get("cascade_risk"),
+        "liquidity_vacuum": signal.get("liquidity_vacuum", False),
+        "funding_rate": signal.get("funding_rate"),
+        "spread_bps": signal.get("spread_bps"),
+        "book_imbalance": signal.get("book_imbalance"),
+        "open_interest_change_pct": signal.get("open_interest_change_pct"),
         "status": "PENDING",
         "is_active": False,
         "created_at": time.time(),
@@ -160,7 +183,14 @@ def append_closed_trade(trade):
     trade = normalize_trade_schema(trade)
 
     closed = _safe_load(CLOSED_FILE)
-    closed.append(trade)
+    trade_uuid = trade.get("trade_uuid")
+    if trade_uuid and any(t.get("trade_uuid") == trade_uuid for t in closed):
+        closed = [
+            trade if t.get("trade_uuid") == trade_uuid else t
+            for t in closed
+        ]
+    else:
+        closed.append(trade)
     
     # Ensure the entire history list is normalized
     final_list = [normalize_trade_schema(t) for t in closed]

@@ -21,7 +21,7 @@ def calculate_structure_metrics(results_by_tf, bias):
         liq = result.get("liquidity")
         fvg = result.get("fvg")
 
-        if ob and ob.get("type") == bias:
+        if ob and bias in ob.get("type", ""):
             aligned_tfs += 1
 
         if liq and liq.get("has_liquidity"):

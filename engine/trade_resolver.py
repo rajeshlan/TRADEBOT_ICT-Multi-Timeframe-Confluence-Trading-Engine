@@ -21,6 +21,7 @@ from core.state_machine import (
     transition_trade_status,
     set_execution_state
 )
+from core.ids import build_order_intent_id
 
 # Outcome Updater Imports
 from core.setup_memory.outcome_updater import (
@@ -76,6 +77,23 @@ def calculate_position_size(trade):
         print(f"❌ SIZE ERROR {symbol}: {e}")
         return 0
 
+def _extract_order_id(order):
+    if not isinstance(order, dict):
+        return None
+    return order.get("result", {}).get("orderId")
+
+def _find_live_position(symbol):
+    try:
+        return executor.get_position_for_symbol(symbol)
+    except Exception:
+        return None
+
+def _filled_price_from_exchange(symbol, fallback_price):
+    position = _find_live_position(symbol)
+    if position and position.get("avgPrice"):
+        return float(position["avgPrice"])
+    return fallback_price
+
 def close_trade(trade, exit_price, result):
     """Finalizes trade data for logging and calculates PnL."""
     trade = transition_trade_status(trade, "CLOSED")
@@ -103,6 +121,7 @@ def resolve_trades(get_candle_func):
     new_active = []
     tracked_trade_uuids = set()
     changes_made = False
+    cached_positions = []
 
     # 1. POSITION COUNT SYNC & RECONCILIATION
     try:
@@ -207,22 +226,34 @@ def resolve_trades(get_candle_func):
             side = "Buy" if trade["bias"] == "BULLISH" else "Sell"
             qty = calculate_position_size(trade)
             if qty <= 0: continue
+            if not trade.get("order_intent_id"):
+                trade["order_intent_id"] = build_order_intent_id(trade)
 
             try:
                 trade = transition_trade_status(trade, "EXECUTING")
                 trade = set_execution_state(trade, "EXECUTING")
+                trade["last_execution_attempt_at"] = time.time()
                 
-                order = executor.place_market_order(symbol=symbol, side=side, qty=qty)
+                order = executor.place_market_order(
+                    symbol=symbol,
+                    side=side,
+                    qty=qty,
+                    order_link_id=trade["order_intent_id"],
+                )
                 
                 if order and order.get("retCode") == 0:
-                    trade["order_id"] = order["result"]["orderId"]
-                    trade["filled_price"] = float(order.get("result", {}).get("avgPrice") or get_candle_func(symbol)["close"])
+                    trade["order_id"] = _extract_order_id(order)
+                    trade["exchange_order_id"] = trade["order_id"]
+                    fallback_candle = get_candle_func(symbol)
+                    fallback_price = float(fallback_candle["close"]) if fallback_candle else trade["entry"]
+                    trade["filled_price"] = _filled_price_from_exchange(symbol, fallback_price)
 
                     trade = transition_trade_status(trade, "ACTIVE")
                     trade = set_execution_state(trade, "ACTIVE")
                     trade["opened_at"] = int(time.time())
                     trade["qty"] = qty
                     trade["executed_at"] = time.time() 
+                    trade["position_id"] = f"{symbol}_{side}_{trade['order_intent_id']}"
 
                     initialize_tracking(trade)
 
@@ -233,7 +264,23 @@ def resolve_trades(get_candle_func):
                     else:
                         sl, tp = trade["filled_price"] + risk_dist, trade["filled_price"] - (risk_dist * trade["rr_ratio"])
 
-                    executor.set_trading_stop(symbol=symbol, stop_loss=round(sl, 6), take_profit=round(tp, 6))
+                    protection_response = executor.set_trading_stop(symbol=symbol, stop_loss=round(sl, 6), take_profit=round(tp, 6))
+                    protection = executor.verify_position_protection(symbol)
+                    trade["protection_status"] = protection["status"]
+                    trade["protection_broken"] = not protection["ok"]
+                    trade["missing_protection"] = protection["missing"]
+                    if not protection["ok"] or not protection_response or protection_response.get("retCode") != 0:
+                        log_runtime_event(
+                            event_type="PROTECTION_WARNING",
+                            symbol=symbol,
+                            data={
+                                "trade_uuid": trade.get("trade_uuid"),
+                                "setup_id": trade.get("setup_id"),
+                                "order_intent_id": trade.get("order_intent_id"),
+                                "missing_protection": trade["missing_protection"],
+                                "protection_response": protection_response,
+                            }
+                        )
                     register_execution_event(trade)
                     
                     print(f"✅ EXECUTED {symbol} @ {trade['filled_price']}")
@@ -243,11 +290,17 @@ def resolve_trades(get_candle_func):
                         event_type="TRADE_EXECUTED",
                         symbol=symbol,
                         data={
+                            "trade_uuid": trade.get("trade_uuid"),
+                            "setup_id": trade.get("setup_id"),
+                            "decision_id": trade.get("decision_id"),
+                            "order_intent_id": trade.get("order_intent_id"),
+                            "exchange_order_id": trade.get("exchange_order_id"),
                             "filled_price": trade["filled_price"],
                             "qty": qty,
                             "bias": trade.get("bias"),
                             "tp": round(tp, 6),
-                            "sl": round(sl, 6)
+                            "sl": round(sl, 6),
+                            "protection_status": trade.get("protection_status"),
                         }
                     )
                     
@@ -256,6 +309,57 @@ def resolve_trades(get_candle_func):
                     continue
                 else:
                     err_msg = order.get("retMsg", "UNKNOWN_ERROR") if isinstance(order, dict) else "NO_RESP"
+                    err_lower = str(err_msg).lower()
+                    duplicate_link = (
+                        "duplicate" in err_lower
+                        or "orderlinkid" in err_lower
+                        or "orderlinkedid" in err_lower
+                    )
+                    duplicate_position = _find_live_position(symbol) if duplicate_link else None
+                    if duplicate_position:
+                        trade["order_id"] = _extract_order_id(order) or trade.get("order_id")
+                        trade["exchange_order_id"] = trade["order_id"]
+                        trade["filled_price"] = float(duplicate_position.get("avgPrice") or trade["entry"])
+                        trade = transition_trade_status(trade, "ACTIVE")
+                        trade = set_execution_state(trade, "ACTIVE")
+                        trade["opened_at"] = int(time.time())
+                        trade["qty"] = qty
+                        trade["executed_at"] = time.time()
+                        trade["position_id"] = f"{symbol}_{side}_{trade['order_intent_id']}"
+
+                        initialize_tracking(trade)
+                        risk_dist = abs(trade["entry"] - trade["sl"])
+                        if trade["bias"] == "BULLISH":
+                            sl, tp = trade["filled_price"] - risk_dist, trade["filled_price"] + (risk_dist * trade["rr_ratio"])
+                        else:
+                            sl, tp = trade["filled_price"] + risk_dist, trade["filled_price"] - (risk_dist * trade["rr_ratio"])
+
+                        protection_response = executor.set_trading_stop(symbol=symbol, stop_loss=round(sl, 6), take_profit=round(tp, 6))
+                        protection = executor.verify_position_protection(symbol)
+                        trade["protection_status"] = protection["status"]
+                        trade["protection_broken"] = not protection["ok"]
+                        trade["missing_protection"] = protection["missing"]
+                        register_execution_event(trade)
+                        log_runtime_event(
+                            event_type="TRADE_EXECUTED",
+                            symbol=symbol,
+                            data={
+                                "trade_uuid": trade.get("trade_uuid"),
+                                "setup_id": trade.get("setup_id"),
+                                "order_intent_id": trade.get("order_intent_id"),
+                                "filled_price": trade["filled_price"],
+                                "qty": qty,
+                                "bias": trade.get("bias"),
+                                "tp": round(tp, 6),
+                                "sl": round(sl, 6),
+                                "recovered_duplicate_order": True,
+                                "protection_response": protection_response,
+                            }
+                        )
+                        new_active.append(normalize_trade_schema(trade))
+                        changes_made = True
+                        continue
+
                     trade["execution_attempts"] = execution_attempts + 1
                     trade["last_execution_error"] = err_msg
                     trade["retry_after"] = time.time() + (30 * trade["execution_attempts"])
@@ -265,6 +369,10 @@ def resolve_trades(get_candle_func):
                         event_type="EXECUTION_FAILED",
                         symbol=symbol,
                         data={
+                            "trade_uuid": trade.get("trade_uuid"),
+                            "setup_id": trade.get("setup_id"),
+                            "decision_id": trade.get("decision_id"),
+                            "order_intent_id": trade.get("order_intent_id"),
                             "error": err_msg,
                             "attempt": trade["execution_attempts"]
                         }
@@ -279,7 +387,20 @@ def resolve_trades(get_candle_func):
             except Exception as e:
                 print(f"❌ EXECUTION EXCEPTION {symbol}: {e}")
                 trade["execution_attempts"] = execution_attempts + 1
+                trade["last_execution_error"] = str(e)
                 trade["retry_after"] = time.time() + 60
+                log_runtime_event(
+                    event_type="EXECUTION_FAILED",
+                    symbol=symbol,
+                    data={
+                        "trade_uuid": trade.get("trade_uuid"),
+                        "setup_id": trade.get("setup_id"),
+                        "decision_id": trade.get("decision_id"),
+                        "order_intent_id": trade.get("order_intent_id"),
+                        "error": str(e),
+                        "attempt": trade["execution_attempts"],
+                    }
+                )
                 new_active.append(normalize_trade_schema(trade))
                 continue
 

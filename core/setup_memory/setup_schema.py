@@ -16,6 +16,8 @@ def build_setup_snapshot(signal):
         "created_at": time.time(),
 
         # --- Signal Identity ---
+        "runtime_setup_id": signal.get("setup_id"),
+        "decision_id": signal.get("decision_id"),
         "symbol": signal.get("symbol"),
         "bias": signal.get("bias"),
 
@@ -60,6 +62,20 @@ def build_setup_snapshot(signal):
 
         # --- Meta ---
         "execution_type": signal.get("execution_type", "LIVE"),
+        "archetype": signal.get("archetype"),
+        "confluence_score": signal.get("confluence_score"),
+        "setup_grade": signal.get("setup_grade"),
+        "expected_value_r": signal.get("expected_value_r"),
+        "approval_threshold_r": signal.get("approval_threshold_r"),
+        "win_probability": signal.get("win_probability"),
+        "trend_quality": signal.get("trend_quality"),
+        "chop_score": signal.get("chop_score"),
+        "squeeze_risk": signal.get("squeeze_risk"),
+        "cascade_risk": signal.get("cascade_risk"),
+        "funding_rate": signal.get("funding_rate"),
+        "spread_bps": signal.get("spread_bps"),
+        "book_imbalance": signal.get("book_imbalance"),
+        "open_interest_change_pct": signal.get("open_interest_change_pct"),
     }
 
     return snapshot

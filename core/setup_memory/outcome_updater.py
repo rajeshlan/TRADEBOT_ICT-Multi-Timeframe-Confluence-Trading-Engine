@@ -14,6 +14,10 @@ def register_execution_event(trade):
         "timestamp": time.time(),
 
         "trade_id": trade.get("id"),
+        "trade_uuid": trade.get("trade_uuid"),
+        "setup_id": trade.get("setup_id"),
+        "decision_id": trade.get("decision_id"),
+        "order_intent_id": trade.get("order_intent_id"),
         "symbol": trade.get("symbol"),
 
         "status": trade.get("status"),
@@ -47,6 +51,10 @@ def register_telemetry_event(trade):
         "timestamp": time.time(),
 
         "trade_id": trade.get("id"),
+        "trade_uuid": trade.get("trade_uuid"),
+        "setup_id": trade.get("setup_id"),
+        "decision_id": trade.get("decision_id"),
+        "order_intent_id": trade.get("order_intent_id"),
         "symbol": trade.get("symbol"),
 
         "unrealized_pnl": trade.get("unrealized_pnl"),
@@ -70,6 +78,10 @@ def register_close_event(trade):
         "timestamp": time.time(),
 
         "trade_id": trade.get("id"),
+        "trade_uuid": trade.get("trade_uuid"),
+        "setup_id": trade.get("setup_id"),
+        "decision_id": trade.get("decision_id"),
+        "order_intent_id": trade.get("order_intent_id"),
         "symbol": trade.get("symbol"),
 
         "result": trade.get("result"),

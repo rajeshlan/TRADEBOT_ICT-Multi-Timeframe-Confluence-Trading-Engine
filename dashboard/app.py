@@ -17,6 +17,7 @@ from components.charts import (
     render_winrate_chart
 )
 from components.order_cards import render_order_card
+from components.analytics_panel import render_research_panel
 
 # --- 2. CORE SYSTEM IMPORTS ---
 load_dotenv()
@@ -32,6 +33,7 @@ sys.path.append(
 
 from storage.trade_logger import load_active_trades, load_closed_trades
 from analytics.trade_analytics import compute_pair_stats
+from analytics.research import build_research_summary
 from core.executor import executor
 
 # ✅ NEW: IMPORT RUNTIME LOGGER DATA
@@ -73,6 +75,7 @@ equity_live = current_balance + floating_pnl
 total_exposure = sum(abs(float(p.get("positionValue", 0))) for p in live_positions)
 margin_ratio = (total_exposure / equity_live) if equity_live > 0 else 0
 stats = compute_pair_stats(closed_trades)
+research_summary = build_research_summary(closed_trades)
 
 # =========================================================
 # HEADER & TOP KPI BAR
@@ -132,6 +135,9 @@ with right_col:
     if stats:
         st.caption("Winrate by Asset")
         render_winrate_chart(stats)
+
+    st.markdown("---")
+    render_research_panel(research_summary)
 
     st.markdown("---")
     st.subheader("🛡️ Risk Management")

@@ -201,12 +201,58 @@ class BybitExecutor:
             if not response or response.get("retCode") != 0:
                 return []
                 
-            return response if response else {}
+            return response.get("result", {}).get("list", []) or []
         except Exception as e:
             print(f"❌ [OPEN_ORDERS_FAIL] {e}")
             return []
 
-    def place_market_order(self, symbol, side, qty):
+    def get_order_history(self, symbol=None, order_link_id=None):
+        """Fetches recent order history, optionally filtered by orderLinkId."""
+        try:
+            payload = {"category": "linear"}
+            if symbol:
+                payload["symbol"] = symbol
+            if order_link_id:
+                payload["orderLinkId"] = order_link_id
+
+            response = self._signed_request("GET", "/v5/order/history", payload)
+            if not response or response.get("retCode") != 0:
+                return []
+            return response.get("result", {}).get("list", []) or []
+        except Exception as e:
+            print(f"[ORDER_HISTORY_FAIL] {e}")
+            return []
+
+    def get_position_for_symbol(self, symbol):
+        positions = self.get_all_positions()
+        for position in positions:
+            if position.get("symbol") == symbol and abs(float(position.get("size", 0))) > 0:
+                return position
+        return None
+
+    def verify_position_protection(self, symbol):
+        position = self.get_position_for_symbol(symbol)
+        if not position:
+            return {
+                "ok": False,
+                "status": "NO_POSITION",
+                "missing": ["POSITION"],
+            }
+
+        missing = []
+        if not position.get("takeProfit"):
+            missing.append("TP")
+        if not position.get("stopLoss"):
+            missing.append("SL")
+
+        return {
+            "ok": not missing,
+            "status": "PROTECTED" if not missing else "MISSING_PROTECTION",
+            "missing": missing,
+            "position": position,
+        }
+
+    def place_market_order(self, symbol, side, qty, order_link_id=None):
         """
         Executes a market order.
         ✅ STEP 2 — BLOCK LIVE EXECUTION OUTSIDE LIVE MODE
@@ -227,6 +273,8 @@ class BybitExecutor:
                 "qty": str(qty),
                 "timeInForce": "IOC"
             }
+            if order_link_id:
+                payload["orderLinkId"] = str(order_link_id)[:36]
             return self._signed_request("POST", "/v5/order/create", payload)
         except Exception as e:
             print(f"❌ [ORDER_FAIL] {symbol}: {e}")
