@@ -13,20 +13,27 @@ from core.signal_quality import (
 )
 from core.ids import build_decision_id, build_setup_id
 
-# ✅ UPGRADE 7: IMPORT SETUP GRADER
+# UPGRADE 7: IMPORT SETUP GRADER
 from core.setup_grader import grade_trade_setup
 
-# ✅ SYSTEM STATE & SESSION IMPORTS
+# SYSTEM STATE & SESSION IMPORTS
 from core.system_state import drawdown_guard
 from core.session_engine import get_current_session
 
-# ✅ STEP 1 — ADD CORRELATION & STORAGE IMPORTS
+# STEP 1 — ADD CORRELATION & STORAGE IMPORTS
 from core.correlation_engine import correlated_positions_count
 from storage.trade_logger import load_active_trades, load_closed_trades
 from analytics.research import empirical_prior_for
 
-# ✅ STEP 2 — ADD RUNTIME LOGGER IMPORT
+# STEP 2 — ADD RUNTIME LOGGER IMPORT
 from utils.runtime_logger import log_runtime_event
+
+# 🚀 STEP 1 (UPGRADE) — IMPORT THE NEW RISK ENGINE
+from risk.adaptive_risk import (
+    compute_atr,
+    build_adaptive_stop,
+    volatility_is_tradeable,
+)
 
 class SignalManager:
     """
@@ -35,11 +42,11 @@ class SignalManager:
     """
 
     def __init__(self):
-        # 1️⃣ TRACKERS: Prevents over-trading and protects against "signal spam"
+        # TRACKERS: Prevents over-trading and protects against "signal spam"
         self.last_signals = {}       # Key: "SYMBOL_BIAS" -> Value: timestamp
         self.last_signal_time = {}   # Key: "SYMBOL" -> Value: timestamp
         
-        # 🧠 DISCIPLINE CONFIG
+        # DISCIPLINE CONFIG
         self.cooldown = 1800         # 30 mins for same-side bias
         self.cooldown_seconds = 900  # 15 mins total silence for symbol after ANY signal
 
@@ -56,12 +63,12 @@ class SignalManager:
             if result and result.get("candles"):
                 candles_by_tf[tf] = result["candles"]
 
-        # 2️⃣ STEP 2: COOLDOWN FILTER
+        # STEP 2: COOLDOWN FILTER
         last_symbol_time = self.last_signal_time.get(symbol)
         if last_symbol_time and (now - last_symbol_time < self.cooldown_seconds):
             print(f"[SKIP] {symbol} in system cooldown")
             
-            # ✅ LOG COOLDOWN EVENT
+            # LOG COOLDOWN EVENT
             log_runtime_event(
                 event_type="SCAN_SKIPPED",
                 symbol=symbol,
@@ -69,7 +76,7 @@ class SignalManager:
             )
             return None
 
-        # 🔹 TIMEFRAME WEIGHTING
+        # TIMEFRAME WEIGHTING
         weights = {"1M": 35, "1d": 30, "4h": 25, "2h": 15, "30m": 10, "5m": 5}
 
         score = 0
@@ -125,7 +132,7 @@ class SignalManager:
         if correlated_count >= 2:
             print(f"⚠️ CORRELATED EXPOSURE HIGH: {symbol} (Count: {correlated_count})")
             
-            # ✅ LOG CORRELATION WARNING
+            # LOG CORRELATION WARNING
             log_runtime_event(
                 event_type="CORRELATION_WARNING",
                 symbol=symbol,
@@ -200,12 +207,73 @@ class SignalManager:
         if not best_ob:
             return None
 
+        # 🚀 STEPS 2 & 3 (UPGRADE) — VOLATILITY ENGINE & ADAPTIVE STOP OVERRIDE
         entry = best_ob.get("entry")
-        sl = best_ob.get("sl")
+        structure_sl = best_ob.get("sl")
 
-        if entry and sl:
-            risk_pct = abs(entry - sl) / entry * 100
-            if risk_pct > 5: return None
+        if entry and structure_sl:
+
+            # ---------------------------------------------------------
+            # 🚀 VOLATILITY ENGINE
+            # ---------------------------------------------------------
+            execution_tf_candles = (
+                candles_by_tf.get("5m")
+                or candles_by_tf.get("30m")
+                or []
+            )
+
+            atr = compute_atr(execution_tf_candles, period=14)
+
+            # Reject dead/compressed volatility environments
+            if not volatility_is_tradeable(
+                atr=atr,
+                entry=entry,
+                minimum_atr_pct=0.003
+            ):
+                log_runtime_event(
+                    event_type="SETUP_REJECTED",
+                    symbol=symbol,
+                    data={
+                        "reason": "LOW_VOLATILITY_ENVIRONMENT",
+                        "atr": atr,
+                        "entry": entry,
+                        "market_regime": market_regime,
+                    }
+                )
+                return None
+
+            # ---------------------------------------------------------
+            # 🚀 ADAPTIVE STOP ENGINE
+            # ---------------------------------------------------------
+            adaptive_stop = build_adaptive_stop(
+                bias=bias,
+                entry=entry,
+                structure_sl=structure_sl,
+                atr=atr,
+                atr_multiplier=1.5,
+                liquidity_buffer_pct=0.0015
+            )
+
+            sl = adaptive_stop["adaptive_sl"]
+            risk_amount = adaptive_stop["stop_distance"]
+            risk_pct = (risk_amount / entry) * 100
+
+            # Reject absurdly wide invalidations
+            if risk_pct > 6:
+                return None
+
+            # Reject ultra-tight noise stops
+            if risk_pct < 0.25:
+                log_runtime_event(
+                    event_type="SETUP_REJECTED",
+                    symbol=symbol,
+                    data={
+                        "reason": "STOP_TOO_TIGHT",
+                        "risk_pct": risk_pct,
+                        "atr": atr,
+                    }
+                )
+                return None
 
             rr_ratio = 2.0 
             if market_regime == "TRENDING": rr_ratio = 2.8
@@ -217,6 +285,8 @@ class SignalManager:
             tp = entry + (risk_amount * rr_ratio) if bias == "BULLISH" else entry - (risk_amount * rr_ratio)
 
             market_context = get_market_context(symbol)
+            
+            # STEP 4: ADDED VOLATILITY METADATA SELECTION
             preliminary_signal = {
                 "symbol": symbol,
                 "bias": bias,
@@ -230,6 +300,11 @@ class SignalManager:
                 "tp": round(tp, 4),
                 "rr_ratio": rr_ratio,
                 "risk_pct_distance": round(risk_pct, 2),
+                "atr": round(atr, 6),
+                "atr_buffer": adaptive_stop["atr_buffer"],
+                "liquidity_buffer": adaptive_stop["liquidity_buffer"],
+                "structural_sl": round(structure_sl, 6),
+                "adaptive_sl": round(sl, 6),
             }
             preliminary_signal["archetype"] = classify_archetype(
                 preliminary_signal,
@@ -273,7 +348,9 @@ class SignalManager:
                 preliminary_signal,
                 quality,
                 empirical,
-            )
+                box=expectancy if 'expectancy' in locals() else None # Safeguard schema structure
+            ) if False else expected_value_assessment(preliminary_signal, quality, empirical)
+            
             preliminary_signal.update(expectancy)
 
             if not expectancy["approved"]:
@@ -304,7 +381,7 @@ class SignalManager:
             if setup_grade == "C":
                 print(f"[REJECTED] {symbol} Grade too weak: C")
                 
-                # ✅ LOG GRADE REJECTION
+                # LOG GRADE REJECTION
                 log_runtime_event(
                     event_type="SETUP_REJECTED",
                     symbol=symbol,
@@ -318,7 +395,7 @@ class SignalManager:
                 )
                 return None
 
-            # ✅ STEP 6 — DEBUG LOGGING
+            # DEBUG LOGGING
             print(
                 f"🏆 {symbol} | "
                 f"SESSION={current_session} | "
@@ -332,7 +409,7 @@ class SignalManager:
             preliminary_signal["setup_id"] = build_setup_id(preliminary_signal)
             preliminary_signal["decision_id"] = build_decision_id(preliminary_signal)
 
-            # ✅ LOG SETUP APPROVAL
+            # LOG SETUP APPROVAL
             log_runtime_event(
                 event_type="SETUP_APPROVED",
                 symbol=symbol,
@@ -353,6 +430,7 @@ class SignalManager:
                 }
             )
 
+            # STEP 5: TP computation stays identical, adapting perfectly to structural shifts
             risk_amount = abs(entry - sl)
             tp = entry + (risk_amount * rr_ratio) if bias == "BULLISH" else entry - (risk_amount * rr_ratio)
 
